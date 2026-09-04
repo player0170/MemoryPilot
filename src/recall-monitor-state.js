@@ -1,13 +1,13 @@
+import { getChatScopeKey } from './chat-scope.js';
+
 const SNAPSHOT_PREFIX = 'mp_recall_snapshot_';
 const runtimeSnapshots = new Map();
 
-function getScopeKey(ctx = window.SillyTavern?.getContext?.()) {
-  if (!ctx) return 'default';
-  const charId = ctx?.characterId;
-  const charObj = Number.isInteger(charId) ? ctx?.characters?.[charId] : null;
-  const charScope = String(charObj?.avatar ?? charObj?.name ?? ctx?.chatMetadata?.character_name ?? ctx?.name2 ?? '');
-  const chatScope = String(ctx.chatId ?? ctx.chatMetadata?.chat_file_name ?? 'default');
-  return `${chatScope}::${charScope}`;
+// 群聊里 characterId / name2 会随发言成员变化，所以快照的作用域 key 必须由
+// chat-scope 统一计算：否则召回时（正在生成的成员）写入的 key 和打开监控面板时
+// （characterId 已被清空）读取的 key 不是同一个，监控页永远是空白。
+function getScopeKey(ctx = globalThis.SillyTavern?.getContext?.()) {
+  return getChatScopeKey(ctx);
 }
 
 export function loadRecallSnapshot() {

@@ -4,6 +4,7 @@
 import { createAnimaDedupeSession } from './anima-dedupe.js';
 import { createXiaobaixDedupeSession } from './xiaobaix-dedupe.js';
 import { saveRecallSnapshot } from './recall-monitor-state.js';
+import { getChatScopeKey } from './chat-scope.js';
 
 export async function runRecall() {
   const options = arguments[0] || {};
@@ -18,13 +19,8 @@ export async function runRecall() {
   const ctx = window.SillyTavern?.getContext?.();
   if (!ctx) return;
   const chat = ctx.chat || [];
-  const __mpScopeKey = (() => {
-    const charId = ctx?.characterId;
-    const charObj = Number.isInteger(charId) ? ctx?.characters?.[charId] : null;
-    const charScope = String(charObj?.avatar ?? charObj?.name ?? ctx?.chatMetadata?.character_name ?? ctx?.name2 ?? '');
-    const baseChat = String(ctx.chatId ?? ctx.chatMetadata?.chat_file_name ?? '');
-    return `${baseChat}::${charScope}`;
-  })();
+  // 群聊里 characterId / name2 会随发言成员变化，作用域 key 统一由 chat-scope 计算。
+  const __mpScopeKey = getChatScopeKey(ctx, { fallbackBase: '' });
   if (chat.length < 1) return;
 
   // Chat isolation: clear stale localStorage on chat switch
@@ -93,14 +89,23 @@ export async function runRecall() {
 
   // Storage: extensionSettings (server-synced, outside chat file)
   const _EXT_NAME = 'MemoryPilot';
+  // 运行态（turnCounter / stickyState）由 syncMeta 写进 extensionSettings，
+  // 读取必须以同一处为准；chatMetadata 只作为旧版数据的回退来源
+  // （migrateIfNeeded 会清掉 chatMetadata 里的这两个键，读那里永远是空的）。
+  const runtimeRoot = () => {
+    let store = null;
+    try { store = _getStore(); } catch {}
+    const legacy = metaRoot();
+    return {
+      turnCounter: store?.turnCounter ?? legacy.turnCounter,
+      stickyState: store?.stickyState ?? legacy.stickyState,
+    };
+  };
   const _getStore = () => {
     const c = window.SillyTavern?.getContext?.();
     if (!c?.extensionSettings) return null;
     if (!c.extensionSettings[_EXT_NAME]) c.extensionSettings[_EXT_NAME] = {};
-    const charId = c?.characterId;
-    const charObj = Number.isInteger(charId) ? c?.characters?.[charId] : null;
-    const charScope = String(charObj?.avatar ?? charObj?.name ?? c?.chatMetadata?.character_name ?? c?.name2 ?? '');
-    const ck = `${String(c.chatId ?? c.chatMetadata?.chat_file_name ?? 'default')}::${charScope}`;
+    const ck = getChatScopeKey(c);
     if (!c.extensionSettings[_EXT_NAME][ck]) c.extensionSettings[_EXT_NAME][ck] = {};
     return c.extensionSettings[_EXT_NAME][ck];
   };
@@ -112,19 +117,18 @@ export async function runRecall() {
     }, 10000);
   };
   const syncMeta = async (patch, immediate) => {
-    // Only save sticky state to extensionSettings, skip ephemeral stuff
+    // 提示词注入变量只走 chatMetadata.variables，不进 extensionSettings。
+    // turnCounter / recallEvery 必须持久化，否则 turnCounter 永远是 1，
+    // 「每 N 轮重新评估」与 sticky 保留轮数都会失效。
     if (!patch) return;
-    const dominated = ['turnCounter','recallEvery','mp_recall_pin','mp_recall_ctx','mp_pending_ops'];
-    const dominated_set = new Set(dominated);
-    const dominated_only = Object.keys(patch).every(k => dominated_set.has(k));
-    if (dominated_only) return; // skip ephemeral-only patches
+    const skipped = new Set(['mp_recall_pin','mp_recall_ctx','mp_pending_ops']);
+    const entries = Object.entries(patch).filter(([k, v]) => (
+      !skipped.has(k) && !(k === 'mp_memories' && Array.isArray(v))
+    ));
+    if (!entries.length) return;
     const store = _getStore();
     if (!store) return;
-    for (const [k, v] of Object.entries(patch)) {
-      if (dominated_set.has(k)) continue;
-      if (k === 'mp_memories' && Array.isArray(v)) continue; // memories stored separately
-      store[k] = v;
-    }
+    for (const [k, v] of entries) store[k] = v;
     _saveDebounced();
   };
 
@@ -347,6 +351,14 @@ export async function runRecall() {
   if (!Array.isArray(memories) || !memories.length) {
     await saveText('mp_recall_pin', '');
     await saveText('mp_recall_ctx', '');
+    // 留一条监控记录：否则「读不到记忆」时监控页完全空白，无法区分
+    // 「没有记忆」和「召回根本没跑」。
+    saveRecallSnapshot({
+      version: 'v32', evaluated: false, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
+      maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5,
+      sources: [], pinned: [], triggered: [],
+      note: `当前作用域（${__mpScopeKey}）没有读到任何记忆，本轮召回已跳过。`,
+    });
     return;
   }
   memories = dedupeByFingerprint(memories);
@@ -356,10 +368,11 @@ export async function runRecall() {
   memories = animaDedupe.filter(memories);
   memories = xiaobaixDedupe.filter(memories);
 
-  const turnCounter = Math.max(0, Number(metaRoot().turnCounter || 0)) + 1;
+  const runtime = runtimeRoot();
+  const turnCounter = Math.max(0, Number(runtime.turnCounter || 0)) + 1;
   await syncMeta({ turnCounter, recallEvery: RECALL_EVERY });
-  // Sticky state: 从 chatMetadata 读取
-  const stickyRaw = metaRoot().stickyState || {};
+  // Sticky state: 与 syncMeta 同源（extensionSettings），旧版 chatMetadata 作回退
+  const stickyRaw = runtime.stickyState || {};
   const STICKY_TURNS = recallCfg.stickyTurns ?? 5;
 
   // 首轮强制全量评估；后续按 RECALL_EVERY 节奏

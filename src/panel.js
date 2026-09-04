@@ -4,6 +4,7 @@
 import { loadMemories, saveMemories } from './storage.js';
 import { loadCurrentAnimaSummaries } from './anima-adapter.js';
 import { findLegacyHoraeCoverage, isLegacyHoraeSummaryMemory, loadCurrentHoraeMemories } from './horae-adapter.js';
+import { getChatScopeKey } from './chat-scope.js';
 
 export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
 (async () => {
@@ -32,13 +33,8 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
   const ctx = window.SillyTavern?.getContext?.();
   if (!ctx) return;
   const chat = ctx.chat || [];
-  const __mpScopeKey = (() => {
-    const charId = ctx?.characterId;
-    const charObj = Number.isInteger(charId) ? ctx?.characters?.[charId] : null;
-    const charScope = String(charObj?.avatar ?? charObj?.name ?? ctx?.chatMetadata?.character_name ?? ctx?.name2 ?? '');
-    const baseChat = String(ctx.chatId ?? ctx.chatMetadata?.chat_file_name ?? '');
-    return `${baseChat}::${charScope}`;
-  })();
+  // 群聊里 characterId / name2 会随发言成员变化，作用域 key 统一由 chat-scope 计算。
+  const __mpScopeKey = getChatScopeKey(ctx, { fallbackBase: '' });
 
   // Chat isolation: clear stale localStorage on chat switch
   const _cid = __mpScopeKey;
@@ -78,10 +74,7 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
     const c = window.SillyTavern?.getContext?.();
     if (!c?.extensionSettings) return null;
     if (!c.extensionSettings[_EXT_NAME]) c.extensionSettings[_EXT_NAME] = {};
-    const charId = c?.characterId;
-    const charObj = Number.isInteger(charId) ? c?.characters?.[charId] : null;
-    const charScope = String(charObj?.avatar ?? charObj?.name ?? c?.chatMetadata?.character_name ?? c?.name2 ?? '');
-    const ck = `${String(c.chatId ?? c.chatMetadata?.chat_file_name ?? 'default')}::${charScope}`;
+    const ck = getChatScopeKey(c);
     if (!c.extensionSettings[_EXT_NAME][ck]) c.extensionSettings[_EXT_NAME][ck] = {};
     return c.extensionSettings[_EXT_NAME][ck];
   };
@@ -105,19 +98,17 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
     }, 10000);
   };
   const syncMeta = async (patch, immediate) => {
-    // Only save sticky state to extensionSettings, skip ephemeral stuff
+    // 提示词注入变量只走 chatMetadata.variables，不进 extensionSettings；
+    // turnCounter / recallEvery 需要与召回引擎同源持久化。
     if (!patch) return;
-    const dominated = ['turnCounter','recallEvery','mp_recall_pin','mp_recall_ctx','mp_pending_ops'];
-    const dominated_set = new Set(dominated);
-    const dominated_only = Object.keys(patch).every(k => dominated_set.has(k));
-    if (dominated_only) return; // skip ephemeral-only patches
+    const skipped = new Set(['mp_recall_pin','mp_recall_ctx','mp_pending_ops']);
+    const entries = Object.entries(patch).filter(([k, v]) => (
+      !skipped.has(k) && !(k === 'mp_memories' && Array.isArray(v))
+    ));
+    if (!entries.length) return;
     const store = _getStore();
     if (!store) return;
-    for (const [k, v] of Object.entries(patch)) {
-      if (dominated_set.has(k)) continue;
-      if (k === 'mp_memories' && Array.isArray(v)) continue; // memories stored separately
-      store[k] = v;
-    }
+    for (const [k, v] of entries) store[k] = v;
     _saveDebounced();
   };
   const pullJson = async (key, fallback) => {

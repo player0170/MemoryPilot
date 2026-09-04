@@ -205,6 +205,118 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   assert.equal(stickyDeduped.storedSticky['manual-1'].turnsLeft, 2, `${version}: 非 Anima sticky 仍按原逻辑衰减`);
 }
 
+// ===== 群聊作用域回归 =====
+// 群聊里 SillyTavern 会在生成每个成员的回复前把 characterId / name2 改成该成员，
+// 生成结束后又清空。旧版作用域 key 用的正是这两个字段，于是同一个群聊被拆成多个
+// 存储桶，召回永远读到空数组并把注入变量写成空串。
+
+const groupMemory = {
+  id: 'group-1',
+  source: 'manual',
+  event: '会议室·三人共同决定',
+  summary: '三人在会议室达成一致：明天一起去旧车站取回被寄存的行李箱，谁都不许提前走。',
+  priority: 'medium',
+  primaryKeywords: ['旧车站'],
+  timestamp: 1,
+};
+
+const groupMembers = [
+  { avatar: 'alice.png', name: 'Alice' },
+  { avatar: 'bob.png', name: 'Bob' },
+];
+
+async function executeGroupTurn(runRecall, { storage, extensionSettings, speakerIndex }) {
+  const chatMetadata = { extensions: { MemoryPilot: {} }, variables: {} };
+  const speaker = speakerIndex == null ? null : groupMembers[speakerIndex];
+  const context = {
+    chatId: 'group-chat',
+    groupId: 'group-1',
+    groups: [{ id: 'group-1', chat_id: 'group-chat', chats: ['group-chat'] }],
+    // 正在生成的成员：每轮都不一样，回复结束后被清空。
+    characterId: speakerIndex ?? undefined,
+    characters: groupMembers,
+    name2: speaker?.name ?? '',
+    chat: [{ is_user: true, mes: '我们明天真的要去旧车站吗？' }],
+    chatMetadata,
+    extensionSettings,
+    saveSettingsDebounced() {},
+  };
+
+  globalThis.window = globalThis;
+  globalThis.localStorage = storage;
+  globalThis.SillyTavern = { getContext: () => context };
+  globalThis.TavernHelper = undefined;
+
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) =>
+    originalSetTimeout(callback, Math.min(Number(delay) || 0, 1), ...args);
+  try {
+    await settleRecall(runRecall);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  return chatMetadata.variables.mp_recall_ctx || '';
+}
+
+const { getChatScopeKey } = await import('../src/chat-scope.js');
+
+for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]]) {
+  const groupScopeKey = 'group-chat::group:group-1';
+  // 记忆按群作用域存放在 extensionSettings 里（localStorage 缓存留空，强制走服务端同步来源）。
+  const extensionSettings = {
+    MemoryPilot: {
+      [groupScopeKey]: {
+        mp_memories: [groupMemory],
+        mp_recall_settings: { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, animaDedupe: false, xiaobaixDedupe: false },
+      },
+    },
+  };
+  const storage = new MemoryStorage({ mp_active_chat: groupScopeKey });
+
+  const expected = `[${groupMemory.event}] ${groupMemory.summary}`;
+  const first = await executeGroupTurn(runRecall, { storage, extensionSettings, speakerIndex: 0 });
+  assert.equal(first, expected, `${version}: 群聊第一个成员发言时应召回到群作用域的记忆`);
+
+  const second = await executeGroupTurn(runRecall, { storage, extensionSettings, speakerIndex: 1 });
+  assert.equal(second, expected, `${version}: 换成员发言后作用域不应漂移，召回结果必须一致`);
+
+  const idle = await executeGroupTurn(runRecall, { storage, extensionSettings, speakerIndex: null });
+  assert.equal(idle, expected, `${version}: 生成结束（characterId 被清空）后仍应命中同一作用域`);
+
+  assert.equal(
+    storage.getItem('mp_active_chat'),
+    groupScopeKey,
+    `${version}: 群聊内不应因发言成员变化被判定为切换聊天`,
+  );
+  assert.equal(
+    Object.keys(extensionSettings.MemoryPilot).length,
+    1,
+    `${version}: 群聊不应再按发言成员派生出额外的存储桶`,
+  );
+}
+
+// chat-scope 本身：群 id 的三级探测与单聊行为
+assert.equal(
+  getChatScopeKey({ chatId: 'c1', groupId: 'g1', characterId: 0, characters: [{ avatar: 'a.png' }], name2: 'A' }),
+  'c1::group:g1',
+  'groupId 存在时必须忽略当前发言成员',
+);
+assert.equal(
+  getChatScopeKey({ chatId: 'c1', selected_group: 'g1', name2: 'A' }),
+  'c1::group:g1',
+  '应兼容 selected_group 字段',
+);
+assert.equal(
+  getChatScopeKey({ chatId: 'c1', groups: [{ id: 'g1', chat_id: 'c1' }], name2: 'A' }),
+  'c1::group:g1',
+  'groupId / selected_group 都缺失时应能从 groups 反查',
+);
+assert.equal(
+  getChatScopeKey({ chatId: 'c1', characterId: 0, characters: [{ avatar: 'solo.png' }], name2: 'Solo' }),
+  'c1::solo.png',
+  '单人聊天的作用域算法必须与旧版一致，避免已有数据失联',
+);
+
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 assert.doesNotMatch(indexSource, /MemoryPilotRecallInterceptor/, '不应保留生成前召回拦截器');
 assert.match(indexSource, /MESSAGE_RECEIVED[\s\S]*?await runRecall\(\)/, '召回应继续由 MESSAGE_RECEIVED 触发');

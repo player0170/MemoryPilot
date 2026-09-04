@@ -9,6 +9,7 @@ import {
   parseSummaryMemories,
   normalizePriority,
 } from './summary-service.js';
+import { getChatScopeKey } from './chat-scope.js';
 
 export const AUTO_SUMMARY_DEFAULTS = Object.freeze({
   enabled: false,
@@ -226,11 +227,10 @@ function currentCleaner(ctx) {
   return normalizeCleaner(loadLegacyPanelValue(ctx, 'mp_text_clean_cfg', {}));
 }
 
+// 群聊里 characterId / name2 会随发言成员变化。这里必须用稳定的作用域 key，
+// 否则总结期间换成员发言会被误判为「聊天已切换」，结果被整批丢弃。
 function contextIdentity(ctx) {
-  const charId = ctx?.characterId;
-  const charObj = Number.isInteger(charId) ? ctx?.characters?.[charId] : null;
-  const charScope = String(charObj?.avatar ?? charObj?.name ?? ctx?.chatMetadata?.character_name ?? ctx?.name2 ?? '');
-  return `${String(ctx?.chatId ?? ctx?.chatMetadata?.chat_file_name ?? 'default')}::${charScope}`;
+  return getChatScopeKey(ctx);
 }
 
 function contiguousRanges(indices) {

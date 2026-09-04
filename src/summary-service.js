@@ -1,5 +1,7 @@
 // Shared floor-summary helpers used by the manual panel and automatic summarizer.
 
+import { getChatScopeKey } from './chat-scope.js';
+
 export const DEFAULT_SUMMARY_PROMPT = `分析以下对话，提取值得长期记忆的重要事件。
 
 聚合原则：同一场景（同一时间段、同一地点、同一组人物的连续互动）合并为一条事件。但如果场景中有明确的话题转折或情感转折，可以拆成2-3条。20条对话通常提取3-6条事件。
@@ -162,11 +164,8 @@ export function extractAllJsonObjects(text) {
 function getCurrentStore(ctx) {
   if (!ctx?.extensionSettings) return null;
   const root = ctx.extensionSettings.MemoryPilot = ctx.extensionSettings.MemoryPilot || {};
-  const charId = ctx.characterId;
-  const charObj = Number.isInteger(charId) ? ctx.characters?.[charId] : null;
-  const charScope = String(charObj?.avatar ?? charObj?.name ?? ctx.chatMetadata?.character_name ?? ctx.name2 ?? '');
-  const key = `${String(ctx.chatId ?? ctx.chatMetadata?.chat_file_name ?? 'default')}::${charScope}`;
-  return root[key] || null;
+  // 群聊里 characterId / name2 会随发言成员变化，作用域 key 统一由 chat-scope 计算。
+  return root[getChatScopeKey(ctx)] || null;
 }
 
 function getGlobalStore(ctx) {

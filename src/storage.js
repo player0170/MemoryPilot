@@ -16,6 +16,8 @@
  *       migration idempotency (不再重复弹通知), beforeunload flush (防丢失)
  */
 
+import { getChatScopeKey, collectLegacyScopeKeys, isGroupChat } from './chat-scope.js';
+
 const META_NS = 'MemoryPilot';
 const MODULE_NAME = 'MemoryPilot';
 const RECOVERY_INDEX_KEY = '_chatRecoveryIndex';
@@ -200,18 +202,7 @@ function refreshCtx() {
 
 function getChatKey() {
   if (_chatKey) return _chatKey;
-  const ctx = getCtx();
-  const charId = ctx?.characterId;
-  const charObj = Number.isInteger(charId) ? ctx?.characters?.[charId] : null;
-  const charScope = String(
-    charObj?.avatar ??
-    charObj?.name ??
-    ctx?.chatMetadata?.character_name ??
-    ctx?.name2 ??
-    ''
-  );
-  const baseChat = String(ctx?.chatId ?? ctx?.chatMetadata?.chat_file_name ?? 'default');
-  _chatKey = `${baseChat}::${charScope}`;
+  _chatKey = getChatScopeKey(getCtx());
   return _chatKey;
 }
 
@@ -856,9 +847,93 @@ async function restoreChatStoreFromPointer(newKey) {
   };
 }
 
+// ====== Group chat scope migration ======
+//
+// 旧版 key 规则在群聊里会随「当前发言成员」漂移，同一个群聊的记忆被拆进了
+// `chatId::`、`chatId::A.png`、`chatId::B.png` 等多个桶。修好 key 之后这些旧桶
+// 不会自动出现在新 key 下，所以第一次打开群聊时把它们合并过来（一次性，做完打标记）。
+
+const MERGE_MARK_PREFIX = 'mp_scope_merged_';
+
+function memoryFingerprint(memory) {
+  const clean = value => String(value ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[，。、！？；：,.;:!?\-#()（）《》【】\[\]{}"'“”‘’\/\\|]/g, '');
+  return `${clean(memory?.event)}||${clean(memory?.summary)}`;
+}
+
+function readBucketMemories(bucket) {
+  if (Array.isArray(bucket?.memories) && bucket.memories.length) return bucket.memories;
+  if (Array.isArray(bucket?.mp_memories) && bucket.mp_memories.length) return bucket.mp_memories;
+  return [];
+}
+
+function mergeMemoryLists(...lists) {
+  const out = [];
+  const seen = new Set();
+  for (const memory of lists.flat()) {
+    if (!memory || typeof memory !== 'object') continue;
+    const fp = memoryFingerprint(memory);
+    if (fp && fp !== '||' && seen.has(fp)) continue;
+    if (fp) seen.add(fp);
+    out.push(memory);
+  }
+  return out;
+}
+
+/**
+ * Merge memories left behind by the old per-speaker scope key into the current
+ * (stable) scope. Only runs for group chats, where the drift actually happened.
+ */
+async function mergeLegacyScopeBuckets(currentKey) {
+  if (!isGroupChat(getCtx())) return null;
+  const markKey = MERGE_MARK_PREFIX + currentKey;
+  try { if (localStorage.getItem(markKey) === '1') return null; } catch {}
+
+  const store = getStore();
+  if (!store) return null;
+  const legacyKeys = collectLegacyScopeKeys(store, currentKey, getCtx());
+  if (!legacyKeys.length) {
+    try { localStorage.setItem(markKey, '1'); } catch {}
+    return null;
+  }
+
+  const target = store[currentKey] = store[currentKey] || {};
+  const before = readBucketMemories(target).length;
+  const merged = mergeMemoryLists(
+    readBucketMemories(target),
+    ...legacyKeys.map(key => readBucketMemories(store[key])),
+  );
+
+  // 聊天级配置（召回设置 / 清洗规则 / sticky 等）只在新桶缺失时补齐，不覆盖已有值。
+  for (const key of legacyKeys) {
+    const bucket = store[key];
+    for (const [field, value] of Object.entries(bucket)) {
+      if (field === 'memories' || field === 'mp_memories' || field === 'memoriesJournal') continue;
+      if (field === '_mergedInto' || target[field] != null) continue;
+      target[field] = value;
+    }
+    bucket._mergedInto = currentKey;
+  }
+
+  if (merged.length) {
+    target.memories = merged;
+    target.mp_memories = merged;
+    _lastMemoriesSignature = null;
+    cacheMemories(merged);
+  }
+  saveSettingsDebounced();
+  try { localStorage.setItem(markKey, '1'); } catch {}
+  const gained = Math.max(0, merged.length - before);
+  logOp('migrate', 'groupScope', `${legacyKeys.length} legacy buckets → ${currentKey.slice(0, 60)}; +${gained} memories`);
+  return { legacyKeys, total: merged.length, gained };
+}
+
 export async function onChatChanged() {
   resetChatKey();
   const newKey = getChatKey();
+  const scopeMerge = await mergeLegacyScopeBuckets(newKey);
   const recovery = await restoreChatStoreFromPointer(newKey);
   // SillyTavern's integrity id survives backup import. Keep an index for older
   // backups that predate our pointer, then persist the current pointer.
@@ -870,7 +945,7 @@ export async function onChatChanged() {
   captureChatMessageSnapshot();
   // 重置迁移标记（不同聊天可能需要迁移）
   // 但实际迁移检查在 migrateIfNeeded 内部做
-  return recovery;
+  return { ...(recovery || {}), scopeMerge, restored: !!recovery?.restored };
 }
 
 function getChatMessageFingerprint(message) {

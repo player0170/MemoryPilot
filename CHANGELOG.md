@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.0.1
+
+- 修复群聊中召回完全失效的问题：作用域 key 原先由「当前发言成员」参与计算，而 SillyTavern 在群聊生成每个成员回复前会改写 `characterId` / `name2`，导致同一个群聊被拆成多个存储桶，召回读到空记忆后把 `mp_recall_pin` / `mp_recall_ctx` 写成空串。现在群聊统一按群 id 作为作用域，单人聊天算法保持不变。
+- 作用域 key 统一到新的 `src/chat-scope.js`，storage / recall-v32 / recall-v34 / panel / api-config / summary-service / auto-summary / 召回监控全部共用同一实现。
+- 群聊首次打开时自动把此前按发言成员分散存储的记忆合并回群作用域，并提示找回条数。
+- 修复召回监控页在群聊中永远空白：快照读写此前用的是不同的 key。记忆为空时也会留一条监控记录，便于区分「没有记忆」和「召回没跑」。
+- 修复 `turnCounter` / `stickyState` 写入 extensionSettings 却从 chatMetadata 读取导致的失效：`every`（每 N 轮重新评估）与 Sticky 保留轮数此前从未真正生效。
+- 修复群聊自动总结被误判为「聊天已切换」而丢弃结果的问题。
+
 ## 4.0.0
 
 - 重整 MemoryPilot 主面板、召回监控和设置/API 配置入口。

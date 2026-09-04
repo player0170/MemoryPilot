@@ -36,6 +36,7 @@ import {
   captureChatMessageSnapshot,
   handleChatMessageDeleted,
 } from './src/storage.js';
+import { getChatScopeKey } from './src/chat-scope.js';
 
 const MODULE_NAME = 'MemoryPilot';
 
@@ -479,14 +480,16 @@ function hookRecall() {
         if (recovery?.restored) {
           toastr?.success?.(`已随聊天备份恢复 ${recovery.memoryCount} 条 MemoryPilot 记忆`);
         }
+        if (recovery?.scopeMerge?.gained > 0) {
+          toastr?.success?.(`群聊记忆已归并：找回 ${recovery.scopeMerge.gained} 条此前按发言成员分散存储的记忆`);
+        }
       } catch (e) {
         console.warn('[MP] chat backup memory recovery err', e);
       }
       try {
         const prev = localStorage.getItem('mp_active_chat');
-        const charId = ctx?.characterId;
-        const charObj = Number.isInteger(charId) ? ctx?.characters?.[charId] : null;
-        const curr = `${String(ctx.chatId ?? ctx.chatMetadata?.chat_file_name ?? '')}::${String(charObj?.avatar ?? charObj?.name ?? ctx?.chatMetadata?.character_name ?? ctx?.name2 ?? '')}`;
+        // 与召回引擎使用同一套作用域算法，群聊里不会随发言成员漂移。
+        const curr = getChatScopeKey(SillyTavern.getContext(), { fallbackBase: '' });
         if (prev && prev !== curr) {
           try { localStorage.removeItem('mp_memories_' + prev); } catch {}
         }
@@ -520,6 +523,9 @@ jQuery(async () => {
     const recovery = await onChatChanged();
     if (recovery?.restored) {
       toastr?.success?.(`已随聊天备份恢复 ${recovery.memoryCount} 条 MemoryPilot 记忆`);
+    }
+    if (recovery?.scopeMerge?.gained > 0) {
+      toastr?.success?.(`群聊记忆已归并：找回 ${recovery.scopeMerge.gained} 条此前按发言成员分散存储的记忆`);
     }
     await migrateIfNeeded();
     // 静默检测，不再弹 toastr —— migrateIfNeeded 内部已做幂等
