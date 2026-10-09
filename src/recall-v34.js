@@ -374,8 +374,9 @@ export async function runRecall() {
   memories = animaDedupe.filter(memories);
   memories = xiaobaixDedupe.filter(memories);
 
-  // 最近楼层记忆：按楼层最大值取最近 N 条（不含常驻），无需命中关键词即注入，
+  // 最近楼层记忆：按记忆列表顺序取最底部 N 条（不含常驻），无需命中关键词即注入，
   // 同时从关键词触发候选与 sticky 中剔除，避免同一条记忆被重复发送。
+  // memMaxFloor 仅保留给原文楼层相关的辅助判断使用。
   const memMaxFloor = (mem) => {
     const segs = Array.isArray(mem?.floorSegments) ? mem.floorSegments : null;
     if (segs && segs.length) {
@@ -641,6 +642,7 @@ export async function runRecall() {
     if (VEC_MODE !== 'keyword' && !keywordGate) reasons.push(primaryKws.length ? '关键词未命中，由向量召回' : '无主关键词，由向量召回');
     if (primaryMatch.exact.length) reasons.push(`主关键词硬命中 ${primaryMatch.exactHitCount}: ${primaryMatch.exact.join(', ')}`);
     if (primaryMatch.weak.length) reasons.push(`主关键词弱匹配 ${primaryMatch.weakHitCount}: ${primaryMatch.weak.join(', ')}`);
+    if (latestUserHit) reasons.push('命中用户最新发言 +0.12');
     if (secondaryKws.length) {
       if (secondaryMatch.exact.length) reasons.push(`门控关键词硬命中 ${secondaryMatch.exactHitCount}: ${secondaryMatch.exact.join(', ')}`);
       if (secondaryMatch.weak.length) reasons.push(`门控关键词弱匹配 ${secondaryMatch.weakHitCount}: ${secondaryMatch.weak.join(', ')}`);

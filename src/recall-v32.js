@@ -373,8 +373,9 @@ export async function runRecall() {
   memories = animaDedupe.filter(memories);
   memories = xiaobaixDedupe.filter(memories);
 
-  // 最近楼层记忆：按楼层最大值取最近 N 条（不含常驻），无需命中关键词即注入，
+  // 最近楼层记忆：按记忆列表顺序取最底部 N 条（不含常驻），无需命中关键词即注入，
   // 同时从关键词触发候选与 sticky 中剔除，避免同一条记忆被重复发送。
+  // memMaxFloor 仅保留给原文楼层相关的辅助判断使用。
   const memMaxFloor = (mem) => {
     const segs = Array.isArray(mem?.floorSegments) ? mem.floorSegments : null;
     if (segs && segs.length) {

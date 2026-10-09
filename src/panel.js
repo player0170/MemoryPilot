@@ -1924,7 +1924,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
           <div class="fg" style="margin-top:12px"><label>上下文窗口（匹配最近 N 条）</label><input id="mp_rctxwin" type="number" min="3" max="30" value="${h(String(loadRecallCfg().contextWindow||8))}"></div>
           <div class="fg" style="margin-top:12px"><label>粘性保持（命中后维持 N 轮）</label><input id="mp_rsticky" type="number" min="0" max="20" value="${h(String(loadRecallCfg().stickyTurns??5))}"></div>
           <div class="fg" style="margin-top:12px"><label>最近楼层记忆数（0 = 关闭，上限 = 当前记忆总数 <span id="mp_rrecent_max">${h(String(dedupeMemories(loadMem()).length))}</span>）</label><input id="mp_rrecent" type="number" min="0" max="${h(String(dedupeMemories(loadMem()).length))}" value="${h(String(loadRecallCfg().recentFloors??0))}"></div>
-          <div class="ht" style="margin-top:7px">填 N 后，每轮都会把楼层号最大的 N 条记忆（不含常驻）直接注入 mp_recall_ctx，不需要命中关键词，也不占用「最大触发召回数」。这些记忆不会再被关键词召回重复发送。没有楼层范围的记忆不参与此项。N 最大为当前记忆总数，保存时超过会自动按总数截断。</div>
+          <div class="ht" style="margin-top:7px">填 N 后，每轮都会把记忆列表最底部的 N 条记忆（不含常驻；列表最底部 = 最新，按「记忆 #」顺序号判定，与原文楼层是否丢失无关）直接注入 mp_recall_ctx，不需要命中关键词，也不占用「最大触发召回数」。这些记忆不会再被关键词召回重复发送。注意：如果用「按楼层 新→旧」把最新记忆排到了列表顶部，这里取到的会是列表底部的旧记忆，请保持「旧→新」顺序。N 最大为当前记忆总数，保存时超过会自动按总数截断。</div>
           <div class="fg" style="margin-top:14px">
             <label class="mp-check"><input type="checkbox" id="mp_anima_dedupe" ${loadRecallCfg().animaDedupe ? 'checked' : ''}>与 Anima 召回结果去重</label>
             <div class="ht" style="margin-top:7px">同一条 Anima 总结已由 Anima 本轮召回时，MemoryPilot 不再重复注入；其他来源的记忆不受影响。</div>
@@ -2241,7 +2241,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
   };
   const sortMemoriesByFloor = async (desc) => {
     if (!memories.length) { toastr?.warning?.('没有可排序的记忆'); return; }
-    if (!confirm(`按楼层${desc ? '从新到旧' : '从旧到新'}重新排列全部记忆？\n没有楼层范围的记忆会保持原顺序放在最后。`)) return;
+    if (!confirm(`按楼层${desc ? '从新到旧' : '从旧到新'}重新排列全部记忆？\n没有楼层范围的记忆会保持原顺序放在最后。${desc ? '\n\n注意：「最近楼层记忆」按列表最底部 = 最新取值，新→旧排序后列表底部会变成最旧的记忆，建议日常保持「旧→新」顺序。' : ''}`)) return;
     const withFloor = memories.filter(m => memoryMaxFloor(m) != null);
     const withoutFloor = memories.filter(m => memoryMaxFloor(m) == null);
     withFloor.sort((a, b) => desc ? (memoryMaxFloor(b) - memoryMaxFloor(a)) : (memoryMaxFloor(a) - memoryMaxFloor(b)));
