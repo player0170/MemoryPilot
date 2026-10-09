@@ -290,6 +290,10 @@ export async function openApiConfig() {
         <div class="f" style="flex:1;margin:0"><label>每批记忆数</label><input id="mpe_batch" type="number" min="1" max="64" step="1" value="${h(String(embCfg.batchSize))}"></div>
       </div>
       <div class="row">
+        <button class="btn" id="mpe_reset">恢复默认数值</button>
+        <span class="hint">维度 ${DEF_EMBEDDING_CFG.dimensions} / 阈值 ${DEF_EMBEDDING_CFG.threshold} / 权重 ${DEF_EMBEDDING_CFG.weight} / 字符数 ${DEF_EMBEDDING_CFG.queryChars} / 超时 ${DEF_EMBEDDING_CFG.timeoutMs} / 每批 ${DEF_EMBEDDING_CFG.batchSize}</span>
+      </div>
+      <div class="row">
         <button class="btn" id="mpe_test">测试连接</button>
         <button class="btn" id="mpe_index">为当前聊天记忆建立向量</button>
         <button class="btn" id="mpe_clear">清空向量缓存</button>
@@ -464,6 +468,17 @@ export async function openApiConfig() {
     } catch (e) {
       $('mpe_fstat').textContent = '失败: ' + e.message;
     }
+  };
+
+  $('mpe_reset').onclick = () => {
+    $('mpe_dims').value = String(DEF_EMBEDDING_CFG.dimensions);
+    $('mpe_threshold').value = String(DEF_EMBEDDING_CFG.threshold);
+    $('mpe_weight').value = String(DEF_EMBEDDING_CFG.weight);
+    $('mpe_qchars').value = String(DEF_EMBEDDING_CFG.queryChars);
+    $('mpe_timeout').value = String(DEF_EMBEDDING_CFG.timeoutMs);
+    $('mpe_batch').value = String(DEF_EMBEDDING_CFG.batchSize);
+    embStatus(true, '已恢复默认数值（未保存，点击下方「保存 Embedding 配置」生效）');
+    toastr?.success?.('已恢复 Embedding 参数默认值');
   };
 
   $('mpe_save').onclick = async () => {
