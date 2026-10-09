@@ -11,11 +11,12 @@ const _EXT_NAME = 'MemoryPilot';
 export const EMBEDDING_MODES = ['keyword', 'hybrid', 'vector'];
 
 export const DEF_EMBEDDING_CFG = {
-  enabled: false,
+  enabled: true,           // 默认开启；未填模型名时 isEmbeddingReady 为 false，自动使用关键词召回
   mode: 'hybrid',          // keyword = 只用关键词；hybrid = 关键词 + 向量；vector = 只用向量
   url: 'https://api.openai.com/v1',
   key: '',
   model: '',
+  models: [],              // 「拉取模型列表」得到的候选模型名，仅用于下拉展示
   dimensions: 0,           // 0 = 不传 dimensions 参数，使用模型默认维度
   threshold: 0.55,         // 余弦相似度达到该值即可在无关键词命中时召回
   weight: 0.35,            // hybrid 模式下向量分数所占比重
@@ -35,11 +36,12 @@ export function normalizeEmbeddingCfg(cfg) {
   const src = cfg && typeof cfg === 'object' ? cfg : {};
   const mode = EMBEDDING_MODES.includes(src.mode) ? src.mode : DEF_EMBEDDING_CFG.mode;
   return {
-    enabled: src.enabled === true,
+    enabled: src.enabled !== false,
     mode,
     url: normalizeEmbeddingBase(src.url || DEF_EMBEDDING_CFG.url),
     key: String(src.key ?? '').trim(),
     model: String(src.model ?? '').trim(),
+    models: Array.isArray(src.models) ? Array.from(new Set(src.models.map(m => String(m ?? '').trim()).filter(Boolean))) : [],
     dimensions: Math.max(0, Math.round(num(src.dimensions, DEF_EMBEDDING_CFG.dimensions))),
     threshold: clamp(num(src.threshold, DEF_EMBEDDING_CFG.threshold), 0, 1),
     weight: clamp(num(src.weight, DEF_EMBEDDING_CFG.weight), 0, 1),

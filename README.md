@@ -86,7 +86,7 @@ v34 会让主要触发优先填充名额，并在满足条件时保留至少一�
 
 ### 向量召回（Embedding）
 
-在「API 配置」页下方的 **向量召回（Embedding）** 区域可以接入任何 OpenAI 兼容的 `/v1/embeddings` 接口（例如 Qwen3-Embedding-8B、text-embedding-3、SiliconFlow 等），填写 URL、Key、模型名，可选 `dimensions`。该配置与主 API 相互独立，默认关闭。
+在「API 配置」页下方的 **向量召回（Embedding）** 区域可以接入任何 OpenAI 兼容的 `/v1/embeddings` 接口（例如 Qwen3-Embedding-8B、text-embedding-3、SiliconFlow 等），填写 URL、Key 后可点「拉取模型列表」从接口的 `/models` 中选择模型，也可手动输入模型名，可选 `dimensions`。该配置与主 API 相互独立，默认开启（混合模式）；未填写模型名时自动使用关键词召回，行为与旧版一致。
 
 三种召回模式：
 

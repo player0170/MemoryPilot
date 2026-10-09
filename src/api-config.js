@@ -1,7 +1,7 @@
 // MemoryPilot API Config - auto-transformed
 
 import { getChatScopeKey } from './chat-scope.js';
-import { loadEmbeddingCfg, saveEmbeddingCfg, normalizeEmbeddingCfg, DEF_EMBEDDING_CFG, testEmbeddingConnection, getMemoryVectors, clearVectorCache, countVectorCache } from './embedding.js';
+import { loadEmbeddingCfg, saveEmbeddingCfg, normalizeEmbeddingCfg, normalizeEmbeddingBase, DEF_EMBEDDING_CFG, testEmbeddingConnection, getMemoryVectors, clearVectorCache, countVectorCache } from './embedding.js';
 
 export async function openApiConfig() {
 (async () => {
@@ -209,6 +209,7 @@ export async function openApiConfig() {
         <button class="settab on">API 配置</button>
         <button class="settab" data-open-panel="recall">召回设置</button>
         <button class="settab" data-open-panel="filter">文本过滤</button>
+        <button class="settab" data-open-panel="data">数据管理</button>
       </nav>
       <div class="formbody">
       <div class="sectionintro">楼层总结与关键词处理 API</div>
@@ -240,7 +241,6 @@ export async function openApiConfig() {
 
       <div class="row">
         <button class="btn" id="mpa_fetch">拉取模型列表</button>
-        <button class="btn" id="mpa_fill">填入推荐默认值</button>
         <span class="hint" id="mpa_fstat"></span>
       </div>
 
@@ -268,7 +268,16 @@ export async function openApiConfig() {
       </div>
       <div class="f"><label>Embedding API URL</label><input id="mpe_url" value="${h(embCfg.url||DEF_EMBEDDING_CFG.url)}" placeholder="https://api.openai.com/v1"></div>
       <div class="f"><label>Embedding API Key</label><input id="mpe_key" type="password" value="${h(embCfg.key||'')}" placeholder="可与上方主 API 不同"></div>
-      <div class="f"><label>Embedding 模型名</label><input id="mpe_model" value="${h(embCfg.model||'')}" placeholder="例如 Qwen/Qwen3-Embedding-8B 或 text-embedding-3-small"></div>
+      <div class="row">
+        <button class="btn" id="mpe_fetch">拉取模型列表</button>
+        <span class="hint" id="mpe_fstat"></span>
+      </div>
+      <div class="f"><label>选择 Embedding 模型</label>
+        <select id="mpe_model_sel">${(embCfg.models || []).length
+          ? ['<option value="">-- 请选择 --</option>'].concat(embCfg.models.map(m => `<option value="${h(m)}" ${m===(embCfg.model||'')?'selected':''}>${h(m)}</option>`)).join('')
+          : '<option value="">-- 请先拉取或手动填写 --</option>'}</select>
+      </div>
+      <div class="f"><label>或手动输入 Embedding 模型名</label><input id="mpe_model" value="${h(embCfg.model||'')}" placeholder="例如 Qwen/Qwen3-Embedding-8B 或 text-embedding-3-small"></div>
       <div class="row" style="align-items:flex-start">
         <div class="f" style="flex:1;margin:0"><label>维度 dimensions（0 = 不传）</label><input id="mpe_dims" type="number" min="0" step="1" value="${h(String(embCfg.dimensions||0))}"></div>
         <div class="f" style="flex:1;margin:0"><label>相似度阈值（0~1）</label><input id="mpe_threshold" type="number" min="0" max="1" step="0.01" value="${h(String(embCfg.threshold))}"></div>
@@ -331,15 +340,6 @@ export async function openApiConfig() {
     $('mpa_url').value = def.url;
     if (mode === 'claude' && !$('mpa_aver').value.trim()) $('mpa_aver').value = '2023-06-01';
     applyProviderUI(mode);
-  };
-
-  $('mpa_fill').onclick = () => {
-    const mode = $('mpa_provider').value;
-    const def = defaultsByProvider[mode] || defaultsByProvider.openai;
-    $('mpa_url').value = def.url;
-    if (mode === 'claude') $('mpa_aver').value = '2023-06-01';
-    applyProviderUI(mode);
-    $('mpa_fstat').textContent = '已填入默认地址';
   };
 
   $('mpa_fetch').onclick = async () => {
@@ -413,12 +413,14 @@ export async function openApiConfig() {
   };
 
   // ===== Embedding 向量召回 =====
+  let embModels = Array.isArray(embCfg.models) ? embCfg.models.slice() : [];
   const readEmbForm = () => normalizeEmbeddingCfg({
     enabled: !!$('mpe_enabled')?.checked,
     mode: $('mpe_mode')?.value,
     url: $('mpe_url')?.value,
     key: $('mpe_key')?.value,
-    model: $('mpe_model')?.value,
+    model: ($('mpe_model')?.value || '').trim() || $('mpe_model_sel')?.value || '',
+    models: embModels,
     dimensions: $('mpe_dims')?.value,
     threshold: $('mpe_threshold')?.value,
     weight: $('mpe_weight')?.value,
@@ -438,6 +440,31 @@ export async function openApiConfig() {
     try { const r = localStorage.getItem('mp_memories'); const a = r ? JSON.parse(r) : []; return Array.isArray(a) ? a : []; } catch { return []; }
   };
   refreshEmbStat();
+
+  // 下拉选中后同步到手动输入框，保存时以输入框为准
+  $('mpe_model_sel').onchange = () => { const v = $('mpe_model_sel').value; if (v) $('mpe_model').value = v; };
+
+  $('mpe_fetch').onclick = async () => {
+    const url = normalizeEmbeddingBase($('mpe_url').value);
+    const key = $('mpe_key').value.trim();
+    if (!url || !key) { $('mpe_fstat').textContent = '请先填 Embedding URL 和 Key'; return; }
+    $('mpe_fstat').textContent = '拉取中...';
+    try {
+      const res = await fetch(url + '/models', { headers: { 'Authorization': 'Bearer ' + key } });
+      if (!res.ok) throw new Error(res.status);
+      const data = await res.json();
+      const models = (data.data || []).map(m => m.id).filter(Boolean).sort();
+      if (!models.length) throw new Error('未返回模型');
+      embModels = models;
+      const cur = $('mpe_model').value.trim();
+      $('mpe_model_sel').innerHTML = ['<option value="">-- 请选择 --</option>'].concat(
+        models.map(m => `<option value="${h(m)}" ${m===cur?'selected':''}>${h(m)}</option>`)
+      ).join('');
+      $('mpe_fstat').textContent = models.length + ' 个模型（列表含全部模型，请选 embedding 类）';
+    } catch (e) {
+      $('mpe_fstat').textContent = '失败: ' + e.message;
+    }
+  };
 
   $('mpe_save').onclick = async () => {
     const c = readEmbForm();

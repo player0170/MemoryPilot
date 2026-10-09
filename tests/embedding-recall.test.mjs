@@ -20,7 +20,9 @@ class MemoryStorage {
   assert.equal(cfg.url, 'https://x.test/v1', 'URL 应去掉尾部 /embeddings 与斜杠');
   assert.equal(cfg.threshold, 1);
   assert.equal(cfg.weight, 0);
-  assert.equal(normalizeEmbeddingCfg({}).enabled, false, '默认关闭');
+  assert.equal(normalizeEmbeddingCfg({}).enabled, true, '默认开启向量召回');
+  assert.equal(normalizeEmbeddingCfg({ enabled: false }).enabled, false, '显式关闭应保留');
+  assert.deepEqual(normalizeEmbeddingCfg({ models: ['a', ' b ', '', 'a', null] }).models, ['a', 'b'], '模型列表去空去重');
 
   const a = l2normalize([3, 4]);
   assert.ok(Math.abs(Math.hypot(a[0], a[1]) - 1) < 1e-6);
