@@ -5,6 +5,7 @@ import { createAnimaDedupeSession } from './anima-dedupe.js';
 import { createXiaobaixDedupeSession } from './xiaobaix-dedupe.js';
 import { saveRecallSnapshot } from './recall-monitor-state.js';
 import { getChatScopeKey } from './chat-scope.js';
+import { loadEmbeddingCfg, isEmbeddingReady, embedQuery, getMemoryVectors, cosineSimilarity } from './embedding.js';
 
 export async function runRecall() {
   const options = arguments[0] || {};
@@ -220,7 +221,7 @@ export async function runRecall() {
     return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
   };
 
-  const DEF_RECALL_SETTINGS = { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, animaDedupe: true, xiaobaixDedupe: true };
+  const DEF_RECALL_SETTINGS = { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, recentFloors: 0, animaDedupe: true, xiaobaixDedupe: true };
   const normalizeRecallSettings = (cfg) => {
     const src = cfg && typeof cfg === 'object' ? cfg : {};
     return {
@@ -229,6 +230,8 @@ export async function runRecall() {
       stickyTurns: clamp(Math.round(Number(src.stickyTurns) ?? DEF_RECALL_SETTINGS.stickyTurns), 0, 20),
       contextWindow: clamp(Math.round(Number(src.contextWindow) || DEF_RECALL_SETTINGS.contextWindow), 3, 30),
       maxRecall: clamp(Math.round(Number(src.maxRecall) || DEF_RECALL_SETTINGS.maxRecall), 1, 20),
+      // 上限为当前记忆总数（取用时由 slice 自然截断），0 = 关闭
+      recentFloors: Math.max(0, Math.round(Number(src.recentFloors) || DEF_RECALL_SETTINGS.recentFloors)),
       animaDedupe: src.animaDedupe !== false,
       xiaobaixDedupe: src.xiaobaixDedupe !== false
     };
@@ -237,6 +240,7 @@ export async function runRecall() {
   const cleanerCfg = normalizeCleaner(await loadJson(CK, DEF_CLEANER));
   const recallCfg = normalizeRecallSettings(await loadJson(RK, DEF_RECALL_SETTINGS));
   MAX_RECALL = recallCfg.maxRecall || 6;
+  const RECENT_FLOORS = recallCfg.recentFloors || 0;
   const RECALL_EVERY = recallCfg.every;
   const CTX_MSGS = recallCfg.contextWindow || 8;
   const blacklist = new Set(((await loadJson(BK, [])) || []).map(norm).filter(Boolean));
@@ -355,8 +359,8 @@ export async function runRecall() {
     // 「没有记忆」和「召回根本没跑」。
     saveRecallSnapshot({
       version: 'v34', evaluated: false, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
-      maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5,
-      sources: [], pinned: [], triggered: [],
+      maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5, recentFloors: RECENT_FLOORS,
+      sources: [], pinned: [], recent: [], triggered: [],
       note: `当前作用域（${__mpScopeKey}）没有读到任何记忆，本轮召回已跳过。`,
     });
     return;
@@ -367,6 +371,39 @@ export async function runRecall() {
   const xiaobaixDedupe = await createXiaobaixDedupeSession({ enabled: options.xiaobaixDedupe ?? recallCfg.xiaobaixDedupe, context: ctx });
   memories = animaDedupe.filter(memories);
   memories = xiaobaixDedupe.filter(memories);
+
+  // 最近楼层记忆：按楼层最大值取最近 N 条（不含常驻），无需命中关键词即注入，
+  // 同时从关键词触发候选与 sticky 中剔除，避免同一条记忆被重复发送。
+  const memMaxFloor = (mem) => {
+    const segs = Array.isArray(mem?.floorSegments) ? mem.floorSegments : null;
+    if (segs && segs.length) {
+      const ends = segs.map(s => Number(Array.isArray(s) ? (s[1] ?? s[0]) : NaN)).filter(Number.isFinite);
+      if (ends.length) return Math.max(...ends);
+    }
+    if (Array.isArray(mem?.floorRange) && mem.floorRange.length) {
+      const end = Number(mem.floorRange[1] ?? mem.floorRange[0]);
+      if (Number.isFinite(end)) return end;
+    }
+    const m = String(mem?.summary || '').match(/\(#(\d+)(?:-(\d+))?\)/);
+    if (m) return Number(m[2] || m[1]);
+    return null;
+  };
+  const recentMems = RECENT_FLOORS > 0
+    ? dedupeByFingerprint(memories
+        .filter(m => m && m.priority !== 'high' && memMaxFloor(m) != null)
+        .sort((a, b) => (memMaxFloor(b) - memMaxFloor(a)) || ((b?.timestamp || 0) - (a?.timestamp || 0))))
+        .slice(0, RECENT_FLOORS)
+        .map(m => ({ ...m, _reason: `最近楼层记忆（最大楼层 #${memMaxFloor(m)}）` }))
+    : [];
+  const recentIds = new Set(recentMems.map(m => String(m?.id ?? '')).filter(Boolean));
+  const recentPrints = new Set(recentMems.map(memFingerprint).filter(Boolean));
+  const isRecentMemory = (mem) => {
+    const id = String(mem?.id ?? '');
+    if (id && recentIds.has(id)) return true;
+    const fp = memFingerprint(mem);
+    return !!fp && recentPrints.has(fp);
+  };
+  const fmtRecent = recentMems.map(m => `[${m.event}] ${m.summary}`);
 
   const runtime = runtimeRoot();
   const turnCounter = Math.max(0, Number(runtime.turnCounter || 0)) + 1;
@@ -388,11 +425,12 @@ export async function runRecall() {
     const stickyMems = [];
     for (const [sid, st] of Object.entries(stickyRaw)) {
       const candidate = { ...(sourceMemoryById.get(String(sid)) || {}), ...st, id: sid };
+      if (isRecentMemory(candidate)) continue;
       if (st.turnsLeft > 0 && st.event && st.summary && !animaDedupe.isDuplicate(candidate) && !xiaobaixDedupe.isDuplicate(candidate)) {
         stickyMems.push(st);
       }
     }
-    const fmtCtx = stickyMems.map(s => `[${s.event}] ${s.summary}`).join('\n');
+    const fmtCtx = [...fmtRecent, ...stickyMems.map(s => `[${s.event}] ${s.summary}`)].join('\n');
     await saveText('mp_recall_ctx', fmtCtx);
 
     // 衰减 sticky
@@ -413,15 +451,17 @@ export async function runRecall() {
     const raw = String(m?.mes || '');
     return { floor: chat.length - recent.length + index + 1, speaker: m?.is_user ? '用户' : (m?.name || '角色'), raw, cleaned: cleanerCfg.cleanForRecall ? applyCleaner(raw, cleanerCfg) : raw };
   });
-  const recordSnapshot = ({ evaluated, pinned = [], triggered = [], note = '' }) => {
+  const recordSnapshot = ({ evaluated, pinned = [], recent = [], triggered = [], note = '' }) => {
     saveRecallSnapshot({
       version: 'v34', evaluated: !!evaluated, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
-      maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5,
+      maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5, recentFloors: RECENT_FLOORS,
+      embedding: embeddingInfo,
       animaDedupeEnabled: recallCfg.animaDedupe !== false, animaDedupeActive: !!animaDedupe.active,
       animaDedupeRemoved: animaDedupe.removedIds?.size || 0,
       xiaobaixDedupeEnabled: recallCfg.xiaobaixDedupe !== false, xiaobaixDedupeActive: !!xiaobaixDedupe.active,
       xiaobaixDedupeRemoved: xiaobaixDedupe.removedIds?.size || 0, sources: sourceMessages,
       pinned: pinned.map(m => ({ id: m?.id ?? '', event: String(m?.event || ''), summary: String(m?.summary || ''), priority: m?.priority || 'high', reason: String(m?._reason || '常驻记忆') })),
+      recent: recent.map(m => ({ id: m?.id ?? '', event: String(m?.event || ''), summary: String(m?.summary || ''), priority: m?.priority || 'medium', reason: String(m?._reason || '最近楼层记忆') })),
       triggered: triggered.map(m => ({ id: m?.id ?? '', event: String(m?.event || ''), summary: String(m?.summary || ''), priority: m?.priority || 'medium', reason: String(m?._reason || '') })), note,
     });
   };
@@ -435,6 +475,51 @@ export async function runRecall() {
   const ctxWords = splitWords(contextText);
   const ctxTerms = extractTerms(contextText, 80);
   const ctxSet = new Set([...ctxWords.map(norm), ...ctxTerms.map(norm)].filter(Boolean).filter(w => !blacklist.has(w)));
+
+  // === 向量召回（Embedding）===
+  // mode: keyword = 原关键词逻辑；hybrid = 关键词命中或相似度≥阈值即可召回，分数混合；
+  // vector = 只看相似度。接口失败 / 未配置时自动回退 keyword，保证不会召不回任何东西。
+  const embCfg = loadEmbeddingCfg(ctx);
+  const WANT_MODE = embCfg.enabled ? embCfg.mode : 'keyword';
+  let queryVec = null;
+  let memVecs = new Map();
+  let vectorActive = false;
+  let vectorNote = '';
+  let vecStats = { cached: 0, computed: 0, failed: 0 };
+  if (WANT_MODE !== 'keyword') {
+    if (!isEmbeddingReady(embCfg)) {
+      vectorNote = 'Embedding 未配置完整（URL / 模型名），本轮回退关键词召回。';
+    } else {
+      try {
+        const candidates = memories.filter(m => m && m.priority !== 'high' && !isRecentMemory(m));
+        const queryText = contextText.length > embCfg.queryChars ? contextText.slice(-embCfg.queryChars) : contextText;
+        const [qv, stats] = await Promise.all([
+          embedQuery(queryText, embCfg),
+          getMemoryVectors(candidates, embCfg),
+        ]);
+        queryVec = qv;
+        memVecs = stats.vectors;
+        vecStats = { cached: stats.cached, computed: stats.computed, failed: stats.failed };
+        vectorActive = !!queryVec && memVecs.size > 0;
+        if (!vectorActive) {
+          vectorNote = stats.error
+            ? `Embedding 调用失败，本轮回退关键词召回：${stats.error?.message || stats.error}`
+            : '没有可用的记忆向量，本轮回退关键词召回。';
+        } else if (stats.error) {
+          vectorNote = `部分记忆向量获取失败（${stats.failed} 条），这些记忆本轮只按关键词判断：${stats.error?.message || stats.error}`;
+        }
+      } catch (e) {
+        vectorActive = false;
+        vectorNote = `Embedding 调用失败，本轮回退关键词召回：${e?.message || e}`;
+      }
+    }
+  }
+  const VEC_MODE = vectorActive ? WANT_MODE : 'keyword';
+  const embeddingInfo = {
+    enabled: !!embCfg.enabled, wantMode: WANT_MODE, mode: VEC_MODE, active: vectorActive,
+    model: embCfg.model || '', threshold: embCfg.threshold, weight: embCfg.weight,
+    cached: vecStats.cached, computed: vecStats.computed, failed: vecStats.failed, note: vectorNote,
+  };
 
   const pinned = [];
 
@@ -469,23 +554,30 @@ export async function runRecall() {
     const mem = memories[idx];
     if (!mem) continue;
     if (mem.priority === 'high') { pinned.push(mem); continue; }
+    if (isRecentMemory(mem)) continue;
 
     const primaryKws = cleanPrimaryKeywords(mem);
-    if (!primaryKws.length) continue;
+    if (!primaryKws.length && VEC_MODE === 'keyword') continue;
     const secondaryKws = cleanSecondaryKeywords(mem);
-    
-    
 
-    const primaryMatch = matchKeywordGroup(contextText, ctxSet, primaryKws);
-    if (primaryMatch.hitCount <= 0) continue;
-    if (primaryMatch.exactHitCount <= 0 && primaryMatch.weakHitCount < 2) continue;
+    // 向量相似度（仅 hybrid / vector 模式且该记忆有向量时有值）
+    const memVec = VEC_MODE !== 'keyword' ? memVecs.get(String(mem?.id ?? '')) : null;
+    const sim = memVec ? cosineSimilarity(queryVec, memVec) : null;
+    const vecHit = sim != null && sim >= embCfg.threshold;
+
+    const emptyMatch = { exact: [], weak: [], exactHitCount: 0, weakHitCount: 0, hitCount: 0 };
+    const primaryMatch = primaryKws.length ? matchKeywordGroup(contextText, ctxSet, primaryKws) : emptyMatch;
+    const keywordGate = primaryMatch.hitCount > 0 && (primaryMatch.exactHitCount > 0 || primaryMatch.weakHitCount >= 2);
+    if (VEC_MODE === 'keyword' && !keywordGate) continue;
+    if (VEC_MODE === 'hybrid' && !keywordGate && !vecHit) continue;
+    if (VEC_MODE === 'vector' && !vecHit) continue;
 
     const secondaryMatch = secondaryKws.length
       ? matchKeywordGroup(contextText, ctxSet, secondaryKws)
-      : { exact: [], weak: [], exactHitCount: 0, weakHitCount: 0, hitCount: 0 };
+      : emptyMatch;
 
-    // Secondary keywords: soft gate (miss = penalty, not skip)
-    const secondaryMiss = secondaryKws.length > 0 && secondaryMatch.hitCount <= 0;
+    // Secondary keywords: soft gate (miss = penalty, not skip); vector 模式不看关键词
+    const secondaryMiss = VEC_MODE !== 'vector' && keywordGate && secondaryKws.length > 0 && secondaryMatch.hitCount <= 0;
 
     const matchedKeywords = uniq([
       ...primaryMatch.exact,
@@ -521,16 +613,24 @@ export async function runRecall() {
     
 
     const totalGateKeywords = primaryKws.length + secondaryKws.length;
-    const keywordScore = totalGateKeywords ? Math.min(1, (exactHitCount + weakHitCount * 0.6) / totalGateKeywords) : 0;
+    const keywordScore = (keywordGate && totalGateKeywords) ? Math.min(1, (exactHitCount + weakHitCount * 0.6) / totalGateKeywords) : 0;
     
     
     const isLow = mem.priority === 'low';
     const pw = isLow ? 0.15 : (mem.priority === 'medium' ? 0.5 : 0.3);
     const secondaryMul = secondaryMiss ? 0.4 : 1.0;
-    const score = Math.max(0.01, (keywordScore * 0.65 + pw * 0.10 + freshness * 0.15) * secondaryMul);
+    const keywordBase = (keywordScore * 0.65 + pw * 0.10 + freshness * 0.15) * secondaryMul;
+    const vecScore = sim != null ? clamp(sim, 0, 1) : 0;
+    let score;
+    if (VEC_MODE === 'vector') score = vecScore * 0.75 + pw * 0.10 + freshness * 0.15;
+    else if (VEC_MODE === 'hybrid') score = keywordBase * (1 - embCfg.weight) + vecScore * embCfg.weight;
+    else score = keywordBase;
+    score = Math.max(0.01, score);
 
     const reasons = [];
     if (isLow) reasons.push('低优先级');
+    if (sim != null) reasons.push(`向量相似度 ${sim.toFixed(3)}${vecHit ? ` ≥ 阈值 ${embCfg.threshold.toFixed(2)}` : ''}`);
+    if (VEC_MODE !== 'keyword' && !keywordGate) reasons.push(primaryKws.length ? '关键词未命中，由向量召回' : '无主关键词，由向量召回');
     if (primaryMatch.exact.length) reasons.push(`主关键词硬命中 ${primaryMatch.exactHitCount}: ${primaryMatch.exact.join(', ')}`);
     if (primaryMatch.weak.length) reasons.push(`主关键词弱匹配 ${primaryMatch.weakHitCount}: ${primaryMatch.weak.join(', ')}`);
     if (secondaryKws.length) {
@@ -545,7 +645,7 @@ export async function runRecall() {
       _score: score,
       _reason: reasons.join('；'),
       _matchedKeywords: matchedKeywords,
-      _debugScore: { keywordScore, pw, score, exactHitCount, weakHitCount, distanceAlpha, ageNorm }
+      _debugScore: { keywordScore, pw, score, exactHitCount, weakHitCount, distanceAlpha, ageNorm, sim, vecHit, mode: VEC_MODE }
     });
   }
 
@@ -611,6 +711,7 @@ export async function runRecall() {
   // 合并 sticky 记忆到输出（补位）
   const stickyExtra = [];
   for (const [sid, st] of Object.entries(nextSticky)) {
+    if (isRecentMemory({ ...(sourceMemoryById.get(String(sid)) || {}), ...st, id: sid })) continue;
     if (!triggeredIds.has(sid) && st.turnsLeft > 0 && st.event && st.summary) {
       stickyExtra.push(st);
     }
@@ -621,10 +722,10 @@ export async function runRecall() {
   await syncMeta({ stickyState: nextSticky });
 
   const fmtPin = finalPinned.map(m => `[${m.event}] ${m.summary}`).join('\n');
-  const fmtCtx = finalWithSticky.map(m => `[${m.event}] ${m.summary}`).join('\n');
+  const fmtCtx = [...fmtRecent, ...finalWithSticky.map(m => `[${m.event}] ${m.summary}`)].join('\n');
 
   await saveText('mp_recall_pin', fmtPin);
   await saveText('mp_recall_ctx', fmtCtx);
-  recordSnapshot({ evaluated: true, pinned: finalPinned, triggered: finalWithSticky });
+  recordSnapshot({ evaluated: true, pinned: finalPinned, recent: recentMems, triggered: finalWithSticky });
 })();
 }

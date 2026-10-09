@@ -317,6 +317,103 @@ assert.equal(
   '单人聊天的作用域算法必须与旧版一致，避免已有数据失联',
 );
 
+// ===== 最近楼层记忆（recentFloors）=====
+// 填 N 后：楼层号最大的 N 条非常驻记忆无需命中关键词即注入 ctx，且不占 maxRecall 名额；
+// 同一条记忆不会再通过关键词召回或 sticky 重复发送。
+
+const recentFloorMemories = [
+  { id: 'pin-1', event: '常驻设定', summary: '主角对猫毛过敏。', priority: 'high', primaryKeywords: ['猫'], floorRange: [90, 99], timestamp: 9 },
+  { id: 'old-1', event: '旧事件·车站', summary: '两人在旧车站第一次相遇。(#1-10)', priority: 'medium', primaryKeywords: ['旧车站'], timestamp: 1 },
+  { id: 'mid-1', event: '中段·借伞', summary: '雨天在旧车站借伞。', priority: 'medium', primaryKeywords: ['旧车站'], floorRange: [20, 30], timestamp: 2 },
+  { id: 'new-1', event: '最新·告别', summary: '在旧车站告别，约定再见。', priority: 'medium', primaryKeywords: ['旧车站'], floorRange: [41, 60], timestamp: 3 },
+  { id: 'new-2', event: '最新·合并事件', summary: '合并后的多段事件。', priority: 'low', primaryKeywords: ['不会命中'], floorSegments: [[31, 40], [61, 70]], timestamp: 4 },
+  { id: 'nofloor-1', event: '无楼层·手动', summary: '没有楼层范围的手动记忆，提到旧车站。', priority: 'medium', primaryKeywords: ['旧车站'], timestamp: 5 },
+];
+
+async function executeRecentFloors(runRecall, { recentFloors, maxRecall = 6, turnCounter = 0, every = 1, stickyState = {} }) {
+  const chatMetadata = { extensions: { MemoryPilot: { turnCounter, stickyState } }, variables: {} };
+  const context = {
+    chatId: 'recent-floors',
+    name2: 'character',
+    chat: [{ is_user: true, mes: '我们再去一次旧车站吧。' }],
+    chatMetadata,
+    extensionSettings: { MemoryPilot: {} },
+    saveSettingsDebounced() {},
+  };
+  const scopeKey = 'recent-floors::character';
+  const storage = new MemoryStorage({
+    mp_active_chat: scopeKey,
+    mp_memories: JSON.stringify(recentFloorMemories),
+    mp_recall_settings: JSON.stringify({ every, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall, recentFloors, animaDedupe: false, xiaobaixDedupe: false }),
+  });
+  globalThis.window = globalThis;
+  globalThis.localStorage = storage;
+  globalThis.SillyTavern = { getContext: () => context };
+  globalThis.TavernHelper = undefined;
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(callback, Math.min(Number(delay) || 0, 1), ...args);
+  try {
+    await settleRecall(runRecall);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  const lines = (chatMetadata.variables.mp_recall_ctx || '').split('\n').filter(Boolean);
+  return {
+    pin: chatMetadata.variables.mp_recall_pin || '',
+    lines,
+    storedSticky: context.extensionSettings.MemoryPilot[scopeKey]?.stickyState || {},
+  };
+}
+
+const fmt = (m) => `[${m.event}] ${m.summary}`;
+const byId = Object.fromEntries(recentFloorMemories.map(m => [m.id, m]));
+
+for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]]) {
+  const off = await executeRecentFloors(runRecall, { recentFloors: 0 });
+  assert.ok(!off.lines.includes(fmt(byId['new-2'])), `${version}: 关闭最近楼层记忆时，未命中关键词的记忆不应注入`);
+  assert.ok(off.lines.includes(fmt(byId['new-1'])), `${version}: 关闭时关键词命中的记忆仍按原逻辑召回`);
+
+  const two = await executeRecentFloors(runRecall, { recentFloors: 2 });
+  assert.deepEqual(
+    two.lines.slice(0, 2),
+    [fmt(byId['new-2']), fmt(byId['new-1'])],
+    `${version}: 应按楼层最大值（含 floorSegments）降序取前 2 条并置于 ctx 最前`,
+  );
+  assert.equal(two.lines.filter(l => l === fmt(byId['new-1'])).length, 1, `${version}: 最近楼层记忆不应再被关键词召回重复发送`);
+  assert.ok(two.lines.includes(fmt(byId['mid-1'])), `${version}: 其他命中关键词的记忆仍应正常召回`);
+  assert.ok(two.lines.includes(fmt(byId['old-1'])), `${version}: 仅在摘要中标注 (#1-10) 的旧记忆仍应参与关键词召回`);
+  assert.equal(two.pin, fmt(byId['pin-1']), `${version}: 常驻记忆不受最近楼层记忆影响`);
+  assert.ok(!two.lines.includes(fmt(byId['pin-1'])), `${version}: 常驻记忆不应被算作最近楼层记忆`);
+
+  // 不占用 maxRecall：maxRecall=1 时，除了 2 条最近楼层记忆，关键词召回仍可给出 1 条
+  const tight = await executeRecentFloors(runRecall, { recentFloors: 2, maxRecall: 1 });
+  assert.equal(tight.lines.length, 3, `${version}: 最近楼层记忆不应占用「最大触发召回数」名额`);
+  assert.deepEqual(tight.lines.slice(0, 2), [fmt(byId['new-2']), fmt(byId['new-1'])], `${version}: 名额收紧时最近楼层记忆仍完整注入`);
+
+  // 没有楼层范围的记忆不参与「最近楼层」，但可通过关键词召回
+  const many = await executeRecentFloors(runRecall, { recentFloors: 10 });
+  const recentPart = many.lines.slice(0, 4);
+  assert.deepEqual(
+    recentPart,
+    [fmt(byId['new-2']), fmt(byId['new-1']), fmt(byId['mid-1']), fmt(byId['old-1'])],
+    `${version}: 有楼层信息的非常驻记忆应全部按楼层降序进入最近楼层记忆`,
+  );
+  assert.deepEqual(many.lines.slice(4), [fmt(byId['nofloor-1'])], `${version}: 无楼层记忆只能通过关键词召回，且不重复`);
+
+  // 非评估轮：最近楼层记忆仍注入，sticky 中与之重复的条目被剔除
+  const stickyState = {
+    'new-1': { event: byId['new-1'].event, summary: byId['new-1'].summary, turnsLeft: 3 },
+    'mid-1': { event: byId['mid-1'].event, summary: byId['mid-1'].summary, turnsLeft: 3 },
+  };
+  const nonEval = await executeRecentFloors(runRecall, { recentFloors: 2, turnCounter: 1, every: 3, stickyState });
+  assert.deepEqual(
+    nonEval.lines,
+    [fmt(byId['new-2']), fmt(byId['new-1']), fmt(byId['mid-1'])],
+    `${version}: 非评估轮应先注入最近楼层记忆，再追加 sticky，且不重复 new-1`,
+  );
+  assert.equal(nonEval.storedSticky['mid-1']?.turnsLeft, 2, `${version}: 非评估轮 sticky 衰减逻辑应保持不变`);
+}
+
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 assert.doesNotMatch(indexSource, /MemoryPilotRecallInterceptor/, '不应保留生成前召回拦截器');
 assert.match(indexSource, /MESSAGE_RECEIVED[\s\S]*?await runRecall\(\)/, '召回应继续由 MESSAGE_RECEIVED 触发');

@@ -41,11 +41,24 @@ export async function openMonitor() {
     }
     const sources = Array.isArray(snap.sources) ? snap.sources : [];
     const pinned = Array.isArray(snap.pinned) ? snap.pinned : [];
+    const recent = Array.isArray(snap.recent) ? snap.recent : [];
     const triggered = Array.isArray(snap.triggered) ? snap.triggered : [];
+    const recentFloors = Number(snap.recentFloors || 0);
+    const emb = snap.embedding && typeof snap.embedding === 'object' ? snap.embedding : null;
+    const modeLabel = m => ({ keyword: '关键词', hybrid: '混合（关键词 + 向量）', vector: '纯向量' }[m] || '关键词');
+    const embSetting = !emb || !emb.enabled
+      ? '向量召回：关闭'
+      : emb.active
+        ? `向量召回：${esc(modeLabel(emb.mode))} · ${esc(emb.model || '')}（阈值 ${esc(Number(emb.threshold ?? 0).toFixed(2))}${emb.mode === 'hybrid' ? `，权重 ${esc(Number(emb.weight ?? 0).toFixed(2))}` : ''}）`
+        : `向量召回：本轮未生效，已回退关键词（设置为 ${esc(modeLabel(emb.wantMode))}）`;
+    const embNote = emb && emb.enabled
+      ? `<div class="muted" style="margin-top:6px">${emb.active ? `记忆向量：缓存命中 ${esc(emb.cached || 0)} 条，本轮新计算 ${esc(emb.computed || 0)} 条${emb.failed ? `，失败 ${esc(emb.failed)} 条` : ''}。` : ''}${emb.note ? ` ${esc(emb.note)}` : ''}</div>`
+      : '';
+    const triggeredTitle = emb && emb.active ? (emb.mode === 'vector' ? '向量触发记忆' : '关键词 / 向量触发记忆') : '关键词触发记忆';
     byId('mpr_summary').textContent = `最近一次召回${snap.savedAt ? `（${new Date(snap.savedAt).toLocaleTimeString()}）` : ''}`;
-    byId('mpr_rules').innerHTML = `<div>每 ${esc(snap.recallEvery || 1)} 轮重新匹配，读取最近 ${esc(snap.contextWindow || sources.length)} 条聊天。</div><div class="row"><div class="setting">最多召回 ${esc(snap.maxRecall || 6)} 条</div><div class="setting">命中后保留 ${esc(snap.stickyTurns ?? 5)} 轮</div><div class="setting">Anima 去重：${snap.animaDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">小白 X 去重：${snap.xiaobaixDedupeEnabled === false ? '关闭' : '开启'}</div></div>`;
+    byId('mpr_rules').innerHTML = `<div>每 ${esc(snap.recallEvery || 1)} 轮重新匹配，读取最近 ${esc(snap.contextWindow || sources.length)} 条聊天。</div><div class="row"><div class="setting">最多召回 ${esc(snap.maxRecall || 6)} 条</div><div class="setting">命中后保留 ${esc(snap.stickyTurns ?? 5)} 轮</div><div class="setting">最近楼层记忆：${recentFloors > 0 ? `${esc(recentFloors)} 条` : '关闭'}</div><div class="setting">Anima 去重：${snap.animaDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">小白 X 去重：${snap.xiaobaixDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">${embSetting}</div></div>${embNote}`;
     byId('mpr_sources').innerHTML = sources.length ? sources.map(item => `<article class="item"><b>#${esc(item.floor)} ${esc(item.speaker)}</b><div>${esc(item.raw || '（空）')}</div></article>`).join('') : '<div class="muted">本轮没有可用于匹配的聊天内容。</div>';
-    byId('mpr_results').innerHTML = renderList('常驻记忆', pinned) + renderList('关键词触发记忆', triggered);
+    byId('mpr_results').innerHTML = renderList('常驻记忆', pinned) + (recentFloors > 0 ? renderList('最近楼层记忆', recent) : '') + renderList(triggeredTitle, triggered);
   };
   byId('mpr_close').onclick = () => { root.remove(); style.remove(); };
   root.querySelector('[data-tab="memory"]').onclick = () => window.MemoryPilot?.openPanel?.('list');

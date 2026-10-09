@@ -1,6 +1,7 @@
 // MemoryPilot API Config - auto-transformed
 
 import { getChatScopeKey } from './chat-scope.js';
+import { loadEmbeddingCfg, saveEmbeddingCfg, normalizeEmbeddingCfg, DEF_EMBEDDING_CFG, testEmbeddingConnection, getMemoryVectors, clearVectorCache, countVectorCache } from './embedding.js';
 
 export async function openApiConfig() {
 (async () => {
@@ -125,6 +126,7 @@ export async function openApiConfig() {
 
   const cfg = await load();
   const provider = cfg.provider || 'openai';
+  const embCfg = loadEmbeddingCfg(ctx);
   const selectedTheme = window.MemoryPilot?.getSettings?.()?.panelTheme || 'dark';
 
   const st = document.createElement('style');
@@ -251,6 +253,41 @@ export async function openApiConfig() {
 
       <button class="btn btn-p" id="mpa_save" style="width:100%;padding:10px;font-size:13px;">保存</button>
       <div id="mpa_status"></div>
+
+      <div class="sectionintro" style="margin-top:26px;padding-top:18px;border-top:1px solid rgba(128,128,128,.25)">向量召回（Embedding）</div>
+      <h3>Memory Pilot - Embedding 配置</h3>
+      <div class="hint" style="margin-bottom:12px">用 OpenAI 兼容的 <code>/v1/embeddings</code> 接口（如 Qwen3-Embedding-8B、text-embedding-3、SiliconFlow 等）给记忆和最近上下文算向量，按余弦相似度召回。记忆向量缓存在浏览器 IndexedDB，文本不变不会重算；每个评估轮只额外调用一次接口。接口失败时自动回退关键词召回。</div>
+
+      <div class="f"><label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="mpe_enabled" style="width:auto" ${embCfg.enabled ? 'checked' : ''}>启用向量召回</label></div>
+      <div class="f"><label>召回模式</label>
+        <select id="mpe_mode">
+          <option value="hybrid" ${embCfg.mode==='hybrid'?'selected':''}>混合：关键词命中或相似度≥阈值均可召回，分数混合（推荐）</option>
+          <option value="vector" ${embCfg.mode==='vector'?'selected':''}>纯向量：只看相似度，关键词不参与召回</option>
+          <option value="keyword" ${embCfg.mode==='keyword'?'selected':''}>关键词：不调用 Embedding，与旧版完全一致</option>
+        </select>
+      </div>
+      <div class="f"><label>Embedding API URL</label><input id="mpe_url" value="${h(embCfg.url||DEF_EMBEDDING_CFG.url)}" placeholder="https://api.openai.com/v1"></div>
+      <div class="f"><label>Embedding API Key</label><input id="mpe_key" type="password" value="${h(embCfg.key||'')}" placeholder="可与上方主 API 不同"></div>
+      <div class="f"><label>Embedding 模型名</label><input id="mpe_model" value="${h(embCfg.model||'')}" placeholder="例如 Qwen/Qwen3-Embedding-8B 或 text-embedding-3-small"></div>
+      <div class="row" style="align-items:flex-start">
+        <div class="f" style="flex:1;margin:0"><label>维度 dimensions（0 = 不传）</label><input id="mpe_dims" type="number" min="0" step="1" value="${h(String(embCfg.dimensions||0))}"></div>
+        <div class="f" style="flex:1;margin:0"><label>相似度阈值（0~1）</label><input id="mpe_threshold" type="number" min="0" max="1" step="0.01" value="${h(String(embCfg.threshold))}"></div>
+        <div class="f" style="flex:1;margin:0"><label>混合模式向量权重（0~1）</label><input id="mpe_weight" type="number" min="0" max="1" step="0.05" value="${h(String(embCfg.weight))}"></div>
+      </div>
+      <div class="hint" style="margin-bottom:12px">阈值：关键词没命中时，相似度达到该值才会被向量召回，一般 0.45~0.65，越高越严。权重：混合模式下向量分数占比，其余为原关键词分数。换模型或改维度后会自动重新计算向量。</div>
+      <div class="row" style="align-items:flex-start">
+        <div class="f" style="flex:1;margin:0"><label>每轮送入的上下文字符数</label><input id="mpe_qchars" type="number" min="200" max="8000" step="100" value="${h(String(embCfg.queryChars))}"></div>
+        <div class="f" style="flex:1;margin:0"><label>超时（毫秒）</label><input id="mpe_timeout" type="number" min="3000" max="120000" step="1000" value="${h(String(embCfg.timeoutMs))}"></div>
+        <div class="f" style="flex:1;margin:0"><label>每批记忆数</label><input id="mpe_batch" type="number" min="1" max="64" step="1" value="${h(String(embCfg.batchSize))}"></div>
+      </div>
+      <div class="row">
+        <button class="btn" id="mpe_test">测试连接</button>
+        <button class="btn" id="mpe_index">为当前聊天记忆建立向量</button>
+        <button class="btn" id="mpe_clear">清空向量缓存</button>
+        <span class="hint" id="mpe_stat"></span>
+      </div>
+      <button class="btn btn-p" id="mpe_save" style="width:100%;padding:10px;font-size:13px;">保存 Embedding 配置</button>
+      <div id="mpe_status"></div>
       </div>
     </div>
   `;
@@ -373,6 +410,82 @@ export async function openApiConfig() {
     await save(c);
     $('mpa_status').innerHTML = '<div class="status ok">已保存，并同步到当前聊天文件</div>';
     toastr?.success?.('API 配置已保存');
+  };
+
+  // ===== Embedding 向量召回 =====
+  const readEmbForm = () => normalizeEmbeddingCfg({
+    enabled: !!$('mpe_enabled')?.checked,
+    mode: $('mpe_mode')?.value,
+    url: $('mpe_url')?.value,
+    key: $('mpe_key')?.value,
+    model: $('mpe_model')?.value,
+    dimensions: $('mpe_dims')?.value,
+    threshold: $('mpe_threshold')?.value,
+    weight: $('mpe_weight')?.value,
+    queryChars: $('mpe_qchars')?.value,
+    timeoutMs: $('mpe_timeout')?.value,
+    batchSize: $('mpe_batch')?.value,
+  });
+  const embStatus = (ok, text) => { const el = $('mpe_status'); if (el) el.innerHTML = `<div class="status ${ok ? 'ok' : 'err'}">${h(text)}</div>`; };
+  const refreshEmbStat = async () => {
+    try { const n = await countVectorCache(); if ($('mpe_stat')) $('mpe_stat').textContent = `已缓存 ${n} 条向量`; } catch {}
+  };
+  const loadCurrentMemories = () => {
+    try {
+      const store = _getStore();
+      if (Array.isArray(store?.mp_memories)) return store.mp_memories;
+    } catch {}
+    try { const r = localStorage.getItem('mp_memories'); const a = r ? JSON.parse(r) : []; return Array.isArray(a) ? a : []; } catch { return []; }
+  };
+  refreshEmbStat();
+
+  $('mpe_save').onclick = async () => {
+    const c = readEmbForm();
+    if (c.enabled && c.mode !== 'keyword' && !c.model) {
+      embStatus(false, '已保存，但模型名为空：向量召回不会生效，将继续使用关键词召回。');
+    } else {
+      embStatus(true, c.enabled && c.mode !== 'keyword' ? `已保存：${c.mode === 'vector' ? '纯向量' : '混合'}模式，模型 ${c.model}` : '已保存：向量召回未启用，使用关键词召回。');
+    }
+    saveEmbeddingCfg(ctx, c);
+    toastr?.success?.('Embedding 配置已保存');
+  };
+
+  $('mpe_test').onclick = async () => {
+    const c = readEmbForm();
+    if (!c.url || !c.model) { embStatus(false, '请先填写 Embedding URL 和模型名'); return; }
+    $('mpe_stat').textContent = '测试中...';
+    try {
+      const r = await testEmbeddingConnection(c);
+      embStatus(true, `连接成功：返回 ${r.dimensions} 维向量，耗时 ${r.ms} ms`);
+    } catch (e) {
+      embStatus(false, `连接失败：${e?.message || e}`);
+    }
+    refreshEmbStat();
+  };
+
+  $('mpe_index').onclick = async () => {
+    const c = readEmbForm();
+    if (!c.url || !c.model) { embStatus(false, '请先填写 Embedding URL 和模型名'); return; }
+    const mems = loadCurrentMemories().filter(m => m && m.priority !== 'high');
+    if (!mems.length) { embStatus(false, '当前聊天没有可建索引的非常驻记忆'); return; }
+    $('mpe_index').disabled = true;
+    $('mpe_stat').textContent = `建立中 0/${mems.length}...`;
+    try {
+      const r = await getMemoryVectors(mems, c, { onProgress: p => { $('mpe_stat').textContent = `建立中 ${p.done}/${p.total}...`; } });
+      if (r.error && !r.computed && !r.cached) embStatus(false, `建立失败：${r.error?.message || r.error}`);
+      else embStatus(!r.error, `向量索引完成：缓存命中 ${r.cached} 条，新计算 ${r.computed} 条${r.failed ? `，失败 ${r.failed} 条（${r.error?.message || ''}）` : ''}`);
+    } catch (e) {
+      embStatus(false, `建立失败：${e?.message || e}`);
+    } finally {
+      $('mpe_index').disabled = false;
+      refreshEmbStat();
+    }
+  };
+
+  $('mpe_clear').onclick = async () => {
+    await clearVectorCache();
+    embStatus(true, '向量缓存已清空，下次召回会重新计算');
+    refreshEmbStat();
   };
 })();
 }

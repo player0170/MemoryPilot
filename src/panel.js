@@ -5,6 +5,7 @@ import { loadMemories, saveMemories } from './storage.js';
 import { loadCurrentAnimaSummaries } from './anima-adapter.js';
 import { findLegacyHoraeCoverage, isLegacyHoraeSummaryMemory, loadCurrentHoraeMemories } from './horae-adapter.js';
 import { getChatScopeKey } from './chat-scope.js';
+import { loadEmbeddingCfg, saveEmbeddingCfg } from './embedding.js';
 
 export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
 (async () => {
@@ -270,7 +271,7 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
     await pushJson(CK, cleanerCfg);
   };
 
-  const DEF_RECALL_SETTINGS = { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, animaDedupe: true, xiaobaixDedupe: true };
+  const DEF_RECALL_SETTINGS = { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, recentFloors: 0, animaDedupe: true, xiaobaixDedupe: true };
   const normalizeRecallSettings = (cfg) => {
     const src = cfg && typeof cfg === 'object' ? cfg : {};
     const num = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
@@ -281,6 +282,7 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
       stickyTurns: clamp(Math.round(num(src.stickyTurns, DEF_RECALL_SETTINGS.stickyTurns)), 0, 20),
       contextWindow: clamp(Math.round(num(src.contextWindow, DEF_RECALL_SETTINGS.contextWindow)), 3, 30),
       maxRecall: clamp(Math.round(num(src.maxRecall, DEF_RECALL_SETTINGS.maxRecall)), 1, 20),
+      recentFloors: Math.max(0, Math.round(num(src.recentFloors, DEF_RECALL_SETTINGS.recentFloors))),
       animaDedupe: src.animaDedupe !== false,
       xiaobaixDedupe: src.xiaobaixDedupe !== false
     };
@@ -620,6 +622,30 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     if (segs && segs.length > 1) return segs.map(s => '#' + s[0] + '-' + s[1]).join(', ');
     if (Array.isArray(mem.floorRange) && mem.floorRange.length >= 2) return '#' + mem.floorRange[0] + '-' + mem.floorRange[1];
     return '';
+  };
+
+  // 记忆所涉及的最大楼层：用于「最近楼层记忆」与按楼层排序，与召回引擎保持一致。
+  const memoryMaxFloor = (mem) => {
+    const segs = Array.isArray(mem?.floorSegments) ? mem.floorSegments : null;
+    if (segs && segs.length) {
+      const ends = segs.map(s => Number(Array.isArray(s) ? (s[1] ?? s[0]) : NaN)).filter(Number.isFinite);
+      if (ends.length) return Math.max(...ends);
+    }
+    if (Array.isArray(mem?.floorRange) && mem.floorRange.length) {
+      const end = Number(mem.floorRange[1] ?? mem.floorRange[0]);
+      if (Number.isFinite(end)) return end;
+    }
+    const m = String(mem?.summary || '').match(/\(#(\d+)(?:-(\d+))?\)/);
+    if (m) return Number(m[2] || m[1]);
+    return null;
+  };
+  const selectRecentFloorMemories = (list, count) => {
+    const n = Math.max(0, Math.round(Number(count) || 0));
+    if (!n) return [];
+    return dedupeMemories((Array.isArray(list) ? list : [])
+      .filter(m => m && m.priority !== 'high' && memoryMaxFloor(m) != null)
+      .sort((a, b) => (memoryMaxFloor(b) - memoryMaxFloor(a)) || ((b?.timestamp || 0) - (a?.timestamp || 0))))
+      .slice(0, n);
   };
 
   const getMergeContext = (mems) => {
@@ -969,6 +995,11 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     const pinned=[];
     if (!due) return { pinned:[], triggered:[], contextText, due:false, nextTurn, every:recallCfgLocal.every };
 
+    const recentMems = selectRecentFloorMemories(list, recallCfgLocal.recentFloors).map(m => ({ ...m, _reason: `最近楼层记忆（最大楼层 #${memoryMaxFloor(m)}）` }));
+    const recentIds = new Set(recentMems.map(m => String(m?.id ?? '')).filter(Boolean));
+    const recentPrints = new Set(recentMems.map(memFingerprint).filter(Boolean));
+    const isRecentMemory = (mem) => recentIds.has(String(mem?.id ?? '')) || recentPrints.has(memFingerprint(mem));
+
     const primary=[];
 
     for(const mem of list){
@@ -977,6 +1008,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
         pinned.push({...mem,_reason:'常驻记忆'});
         continue;
       }
+      if(isRecentMemory(mem)) continue;
 
       const primaryKws = cleanPrimaryKeywordsLocal(mem);
       const secondaryKws = cleanSecondaryKeywordsLocal(mem);
@@ -1068,7 +1100,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     }
 
     selected.sort((a,b)=>b._score-a._score);
-    return { pinned: dedupeByFingerprint(pinned), triggered: dedupeByFingerprint(selected).slice(0, maxTriggered), contextText };
+    return { pinned: dedupeByFingerprint(pinned), triggered: [...recentMems, ...dedupeByFingerprint(selected).slice(0, maxTriggered)], contextText };
   };
 
   // === LLM 调用：带自动重试、超时、合并 abort ===
@@ -1332,6 +1364,15 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     #${P} .st b{display:block;font-size:20px;color:#fff} #${P} .st small{font-size:9px;color:#666}
     #${P} .mi{background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 12px;margin-bottom:7px}
     #${P} .mi:hover{border-color:rgba(255,255,255,0.2)}
+    #${P} .mi.dragging{opacity:.45;pointer-events:none}
+    #${P} .mi.drop-before{box-shadow:0 -3px 0 0 rgba(124,107,240,.95)}
+    #${P} .mi.drop-after{box-shadow:0 3px 0 0 rgba(124,107,240,.95)}
+    #${P}.mp-dragging,#${P}.mp-dragging *{user-select:none!important;-webkit-user-select:none!important}
+    #${P} .mhl{display:flex;align-items:center;gap:6px;min-width:0;flex:1}
+    #${P} .mp-drag{cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;color:#777;font-size:15px;line-height:1;letter-spacing:-2px;padding:2px 4px 2px 0;flex-shrink:0}
+    #${P} .mp-drag:hover{color:#c4b5fd}
+    #${P} .mp-drag:active{cursor:grabbing}
+    #${P} .sortactions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px}
     #${P} .mh{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:3px}
     #${P} .me{font-weight:600;color:#fff;font-size:13px;word-break:break-word}
     #${P} .ms{color:#ccc;font-size:12px;line-height:1.45;margin-bottom:4px;word-break:break-word}
@@ -1716,6 +1757,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
             <summary>记忆筛选与批量操作：<span id="mp_filter_label">全部记忆</span> · <span id="mp_filter_selected">已选 0 条</span></summary>
             <div class="memoryfilterbody">
               <div class="filtersearch"><input id="mp_f_search" placeholder="搜索事件名/摘要…"><button class="btn" id="mp_multi_toggle" type="button" aria-pressed="false">多选</button><button class="btn" id="mp_sel_none" type="button">清空选择</button></div>
+              <div class="sortactions"><span class="ht">排序整理：</span><button class="btn" type="button" id="mp_sort_floor_desc">按楼层 新→旧</button><button class="btn" type="button" id="mp_sort_floor_asc">按楼层 旧→新</button><span class="ht">也可以按住每条记忆左侧的 ⋮⋮ 拖动调整顺序</span></div>
               <div class="filterchoices">
                 <button class="btn" type="button" id="mp_select_all">选择全部记忆 <span class="badge" id="mp_nallpick">0</span></button>
                 <button class="btn" type="button" id="mp_select_xball">选择全部小白X总结 <span class="badge" id="mp_n3">0</span></button>
@@ -1879,13 +1921,20 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
           <div class="fg" style="margin-top:12px"><label>最大触发召回数（不含常驻）</label><input id="mp_rmaxn" type="number" min="1" max="20" value="${h(String(loadRecallCfg().maxRecall||6))}"></div>
           <div class="fg" style="margin-top:12px"><label>上下文窗口（匹配最近 N 条）</label><input id="mp_rctxwin" type="number" min="3" max="30" value="${h(String(loadRecallCfg().contextWindow||8))}"></div>
           <div class="fg" style="margin-top:12px"><label>粘性保持（命中后维持 N 轮）</label><input id="mp_rsticky" type="number" min="0" max="20" value="${h(String(loadRecallCfg().stickyTurns??5))}"></div>
+          <div class="fg" style="margin-top:12px"><label>最近楼层记忆数（0 = 关闭，上限 = 当前记忆总数 <span id="mp_rrecent_max">${h(String(dedupeMemories(loadMem()).length))}</span>）</label><input id="mp_rrecent" type="number" min="0" max="${h(String(dedupeMemories(loadMem()).length))}" value="${h(String(loadRecallCfg().recentFloors??0))}"></div>
+          <div class="ht" style="margin-top:7px">填 N 后，每轮都会把楼层号最大的 N 条记忆（不含常驻）直接注入 mp_recall_ctx，不需要命中关键词，也不占用「最大触发召回数」。这些记忆不会再被关键词召回重复发送。没有楼层范围的记忆不参与此项。N 最大为当前记忆总数，保存时超过会自动按总数截断。</div>
           <div class="fg" style="margin-top:14px">
             <label class="mp-check"><input type="checkbox" id="mp_anima_dedupe" ${loadRecallCfg().animaDedupe ? 'checked' : ''}>与 Anima 召回结果去重</label>
             <div class="ht" style="margin-top:7px">同一条 Anima 总结已由 Anima 本轮召回时，MemoryPilot 不再重复注入；其他来源的记忆不受影响。</div>
             <label class="mp-check" style="margin-top:10px"><input type="checkbox" id="mp_xiaobaix_dedupe" ${loadRecallCfg().xiaobaixDedupe ? 'checked' : ''}>与小白 X 召回结果去重</label>
             <div class="ht" style="margin-top:7px">仅移除本轮已由小白 X 注入的 xb_event；手动记忆、Anima、Horae、楼层总结不受影响。小白 X 读取失败时自动回退原召回。</div>
           </div>
-          <div class="ht" style="margin-bottom:10px">正式召回按每 N 回合执行；插件在最近 N 条聊天中匹配已有记忆关键词，不调用 AI。常驻记忆不占最大触发召回数；主要触发和次级触发需命中主关键词，辅助关键词用于提高语境匹配度，未命中时会降低排序但不会直接淘汰。若同时命中多条，插件会根据关键词匹配程度、楼层距离和召回类型进行排序。</div>
+          <div class="fg" style="margin-top:14px">
+            <label>向量召回（Embedding）</label>
+            <div class="ht" style="margin-top:4px" id="mp_emb_summary">${(() => { const e = loadEmbeddingCfg(ctx); if (!e.enabled || e.mode === 'keyword') return '当前：关键词召回（未启用向量）。'; return `当前：${e.mode === 'vector' ? '纯向量' : '混合（关键词 + 向量）'}，模型 ${h(e.model || '未填写')}，阈值 ${e.threshold.toFixed(2)}${e.mode === 'hybrid' ? `，向量权重 ${e.weight.toFixed(2)}` : ''}。`; })()} 接口地址、模型、模式与阈值在「API 配置」页下方的 Embedding 区域设置。</div>
+            <button class="btn" style="margin-top:8px" data-cfg-action="api">前往 Embedding 配置</button>
+          </div>
+          <div class="ht" style="margin-bottom:10px">正式召回按每 N 回合执行；插件在最近 N 条聊天中匹配已有记忆关键词，不调用对话 AI（开启向量召回后每轮会额外调用一次 Embedding 接口）。常驻记忆不占最大触发召回数；主要触发和次级触发需命中主关键词（混合 / 纯向量模式下相似度达到阈值也可召回），辅助关键词用于提高语境匹配度，未命中时会降低排序但不会直接淘汰。若同时命中多条，插件会根据关键词匹配程度、向量相似度、楼层距离和召回类型进行排序。</div>
           <button class="btn bp1" id="mp_rssv" style="width:100%;padding:9px;font-size:13px;margin-bottom:14px">保存召回设置</button>
           </div>
           </section>
@@ -2002,7 +2051,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     root.querySelector('.bd')?.scrollTo({ top: 0, behavior: 'smooth' });
   };
   root.querySelectorAll('[data-cfg-target]').forEach(btn => btn.addEventListener('click', () => activateCfgSection(btn.getAttribute('data-cfg-target'))));
-  root.querySelector('[data-cfg-action="api"]')?.addEventListener('click', () => window.MemoryPilot?.openApiConfig?.());
+  root.querySelectorAll('[data-cfg-action="api"]').forEach(btn => btn.addEventListener('click', () => window.MemoryPilot?.openApiConfig?.()));
   activateCfgSection(initialCfg);
 
   let selectedIds = new Set();
@@ -2118,6 +2167,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     memories = dedupeMemories(loadMem());
     $('mp_n1').textContent=memories.length;
     $('mp_nallpick').textContent=memories.length;
+    { const _rm=$('mp_rrecent_max'); if(_rm) _rm.textContent=memories.length; const _ri=$('mp_rrecent'); if(_ri) _ri.max=String(memories.length); }
     $('mp_n2').textContent=memories.filter(m=>m.priority==='high').length;
     $('mp_nmed').textContent=memories.filter(m=>m.priority==='medium'||!m.priority).length;
     $('mp_n4').textContent=memories.filter(m=>m.priority==='low').length;
@@ -2147,7 +2197,8 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
       const canRebuild = isRebuildableMemory(m);
       const pick = `<label class="ht mp-pick-wrap" title="选择此记忆"><input type="checkbox" class="mp_pick" aria-label="选择此记忆" data-id="${h(m.id)}" ${selectedIds.has(memoryId(m))?'checked':''}></label>`;
       const rebuildBtn = canRebuild ? `<button class="btn bp1" onclick="window._mpKR('${m.id}')">${kwRunning && kwRunningId===m.id ? '中止重构' : '优化关键词'}</button>` : '';
-      return `<div class="mi" data-mid="${h(m.id)}"><div class="mh"><span class="me jump" title="跳转到完整列表中的位置" onclick="window._mpJump('${m.id}')">${pin}${h(m.event)}</span><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${pick}<span class="bp ${pc}">${pl}</span></div></div>${time}<div class="ms">${h(m.summary)}</div><div class="kr">${src}${pkw}${skw}${ent}</div><div class="ma">${rebuildBtn}<button class="btn" onclick="window._mpE('${m.id}')">编辑</button><button class="btn bd1" onclick="window._mpD('${m.id}')">删除</button></div></div>`;
+      const dragHandle = `<span class="mp-drag" title="按住拖动调整顺序" role="button" aria-label="拖动排序">⋮⋮</span>`;
+      return `<div class="mi" data-mid="${h(m.id)}"><div class="mh"><div class="mhl">${dragHandle}<span class="me jump" title="跳转到完整列表中的位置" onclick="window._mpJump('${m.id}')">${pin}${h(m.event)}</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${pick}<span class="bp ${pc}">${pl}</span></div></div>${time}<div class="ms">${h(m.summary)}</div><div class="kr">${src}${pkw}${skw}${ent}</div><div class="ma">${rebuildBtn}<button class="btn" onclick="window._mpE('${m.id}')">编辑</button><button class="btn bd1" onclick="window._mpD('${m.id}')">删除</button></div></div>`;
     }).join('');
     updateSelectionUI();
     c.querySelectorAll('.mp_pick').forEach(el=>{
@@ -2158,6 +2209,88 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
         else selectedIds.delete(id);
         updateSelectionUI();
       };
+    });
+    bindDragSort(c);
+  };
+
+  // === 记忆拖动排序 ===
+  // 用 Pointer Events 实现，鼠标与触屏通用；按住每条记忆左侧的 ⋮⋮ 拖到目标记忆上半/下半即可。
+  // 在筛选/搜索视图下也可用：移动的是完整列表中的相对位置。
+  const moveMemory = async (fromId, toId, placeAfter) => {
+    if (!fromId || !toId || fromId === toId) return false;
+    const list = [...memories];
+    const fromIdx = list.findIndex(m => memoryId(m) === fromId);
+    if (fromIdx < 0) return false;
+    const [moved] = list.splice(fromIdx, 1);
+    let toIdx = list.findIndex(m => memoryId(m) === toId);
+    if (toIdx < 0) return false;
+    if (placeAfter) toIdx += 1;
+    list.splice(toIdx, 0, moved);
+    memories = dedupeMemories(list);
+    await saveMem(memories);
+    return true;
+  };
+  const sortMemoriesByFloor = async (desc) => {
+    if (!memories.length) { toastr?.warning?.('没有可排序的记忆'); return; }
+    if (!confirm(`按楼层${desc ? '从新到旧' : '从旧到新'}重新排列全部记忆？\n没有楼层范围的记忆会保持原顺序放在最后。`)) return;
+    const withFloor = memories.filter(m => memoryMaxFloor(m) != null);
+    const withoutFloor = memories.filter(m => memoryMaxFloor(m) == null);
+    withFloor.sort((a, b) => desc ? (memoryMaxFloor(b) - memoryMaxFloor(a)) : (memoryMaxFloor(a) - memoryMaxFloor(b)));
+    memories = dedupeMemories([...withFloor, ...withoutFloor]);
+    await saveMem(memories);
+    renderList();
+    toastr?.success?.(`已按楼层${desc ? '新→旧' : '旧→新'}排序`);
+  };
+  let dragState = null;
+  const bindDragSort = (container) => {
+    const scrollBox = root.querySelector('.bd');
+    const clearMarks = () => container.querySelectorAll('.mi.drop-before,.mi.drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after'));
+    const finish = async (commit) => {
+      if (!dragState) return;
+      const { id, el, handle, pointerId, target, after } = dragState;
+      dragState = null;
+      try { handle.releasePointerCapture?.(pointerId); } catch {}
+      el.classList.remove('dragging');
+      root.classList.remove('mp-dragging');
+      clearMarks();
+      if (commit && target && target !== id) {
+        const ok = await moveMemory(id, target, after);
+        if (ok) { renderList(); toastr?.success?.('已调整记忆顺序'); }
+      }
+    };
+    container.querySelectorAll('.mp-drag').forEach(handle => {
+      handle.onpointerdown = (e) => {
+        if (e.button != null && e.button !== 0) return;
+        const el = handle.closest('.mi');
+        if (!el) return;
+        e.preventDefault();
+        dragState = { id: el.getAttribute('data-mid'), el, handle, pointerId: e.pointerId, target: null, after: false };
+        try { handle.setPointerCapture(e.pointerId); } catch {}
+        el.classList.add('dragging');
+        root.classList.add('mp-dragging');
+      };
+      handle.onpointermove = (e) => {
+        if (!dragState || dragState.handle !== handle) return;
+        e.preventDefault();
+        const under = document.elementFromPoint(e.clientX, e.clientY);
+        const over = under?.closest?.('.mi');
+        clearMarks();
+        if (!over || over === dragState.el || !container.contains(over)) { dragState.target = null; }
+        else {
+          const rect = over.getBoundingClientRect();
+          const after = e.clientY > rect.top + rect.height / 2;
+          dragState.target = over.getAttribute('data-mid');
+          dragState.after = after;
+          over.classList.add(after ? 'drop-after' : 'drop-before');
+        }
+        if (scrollBox) {
+          const sb = scrollBox.getBoundingClientRect();
+          if (e.clientY < sb.top + 48) scrollBox.scrollTop -= 14;
+          else if (e.clientY > sb.bottom - 48) scrollBox.scrollTop += 14;
+        }
+      };
+      handle.onpointerup = () => finish(true);
+      handle.onpointercancel = () => finish(false);
     });
   };
 
@@ -2535,9 +2668,11 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
 
     c.innerHTML = html;
     if (tip) {
-      tip.textContent = opts.sync
+      const emb = loadEmbeddingCfg(ctx);
+      const embNote = emb.enabled && emb.mode !== 'keyword' ? ' 注意：已开启向量召回，此处即时模拟只按关键词计算，不调用 Embedding；实际含向量的结果请看「召回监控」。' : '';
+      tip.textContent = (opts.sync
         ? '已用当前召回结果重算并写入 mp_recall_pin / mp_recall_ctx。'
-        : '上半部分是当前这一次将注入的内容；下半部分是缓存中最近一次实际写入的内容。';
+        : '上半部分是当前这一次将注入的内容；下半部分是缓存中最近一次实际写入的内容。') + embNote;
     }
   };
 
@@ -2669,6 +2804,8 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     };
   });
   $('mp_f_search').oninput = () => { _listSearch = $('mp_f_search').value.trim(); searchCursor = -1; renderList(); };
+  $('mp_sort_floor_desc').onclick = () => sortMemoriesByFloor(true);
+  $('mp_sort_floor_asc').onclick = () => sortMemoriesByFloor(false);
   $('mp_multi_toggle').onclick = () => setMultiSelectMode(!multiSelectMode);
   $('mp_select_all').onclick = () => selectMemoryBatch(
     () => true,
@@ -3338,7 +3475,12 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
   $('mp_bpd').onclick=async()=>{$('mp_bpr').value=DEF_PROMPT;await savePrompt(DEF_PROMPT);toastr?.success?.('已恢复默认');};
 
   $('mp_rssv').onclick=async()=>{
-    await saveRecallCfg({every:Math.max(1,Math.round(Number($('mp_revery').value)||1)),alpha:Math.max(0,Math.min(0.95,(($('mp_ralpha').value?.trim?.()==='')?0.72:Number($('mp_ralpha').value)))),maxRecall:Math.max(1,Math.min(20,Number($('mp_rmaxn')?.value)||6)),contextWindow:Math.max(3,Math.min(30,Number($('mp_rctxwin')?.value)||8)),stickyTurns:Math.max(0,Math.min(20,Number($('mp_rsticky')?.value)??5)),animaDedupe:!!$('mp_anima_dedupe')?.checked,xiaobaixDedupe:!!$('mp_xiaobaix_dedupe')?.checked});
+    const recentMax = dedupeMemories(loadMem()).length;
+    const recentWanted = Math.max(0, Math.round(Number($('mp_rrecent')?.value) || 0));
+    const recentFloors = Math.min(recentMax, recentWanted);
+    if ($('mp_rrecent')) $('mp_rrecent').value = String(recentFloors);
+    await saveRecallCfg({every:Math.max(1,Math.round(Number($('mp_revery').value)||1)),alpha:Math.max(0,Math.min(0.95,(($('mp_ralpha').value?.trim?.()==='')?0.72:Number($('mp_ralpha').value)))),maxRecall:Math.max(1,Math.min(20,Number($('mp_rmaxn')?.value)||6)),contextWindow:Math.max(3,Math.min(30,Number($('mp_rctxwin')?.value)||8)),stickyTurns:Math.max(0,Math.min(20,Number($('mp_rsticky')?.value)??5)),recentFloors,animaDedupe:!!$('mp_anima_dedupe')?.checked,xiaobaixDedupe:!!$('mp_xiaobaix_dedupe')?.checked});
+    if (recentWanted > recentMax) toastr?.info?.(`最近楼层记忆数已按当前记忆总数截断为 ${recentFloors}`);
     toastr?.success?.('召回设置已保存');
   };
 
@@ -3372,6 +3514,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
         blacklist: loadBlacklist(),
         cleaner: loadCleaner(),
         apiConfig: loadApi(),
+        embeddingConfig: loadEmbeddingCfg(ctx),
         summaryPrompt: loadPrompt(),
         autoSummaryPrompt: loadAutoPrompt(),
         kwRebuildPrompt: loadKwPrompt(),
@@ -3421,6 +3564,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
       if (Array.isArray(data.blacklist)) { await saveBlacklist(data.blacklist); counts.push('黑名单'); }
       if (data.cleaner) { await saveCleaner(data.cleaner); counts.push('清洗规则'); }
       if (data.apiConfig && data.apiConfig.key) { await saveApi(data.apiConfig); counts.push('API配置'); }
+      if (data.embeddingConfig && typeof data.embeddingConfig === 'object') { saveEmbeddingCfg(ctx, data.embeddingConfig); counts.push('Embedding 配置'); }
       if (data.summaryPrompt) { await savePrompt(data.summaryPrompt); counts.push('总结 Prompt'); }
       if (data.autoSummaryPrompt) { await window.MemoryPilot?.saveAutoSummaryPrompt?.(data.autoSummaryPrompt); counts.push('自动总结 Prompt'); }
       if (data.kwRebuildPrompt) { await saveKwPrompt(data.kwRebuildPrompt); counts.push('重构Prompt'); }
