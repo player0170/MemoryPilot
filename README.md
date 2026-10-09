@@ -179,7 +179,7 @@ API 配置独立于 SillyTavern 的主 API，支持：
 在扩展管理器中安装本仓库：
 
 ```text
-https://github.com/Killuaisaack/MemoryPilot
+https://github.com/player0170/MemoryPilot
 ```
 
 ### 手动安装
