@@ -366,6 +366,7 @@ export async function runRecall() {
     return;
   }
   memories = dedupeByFingerprint(memories);
+  const listFloorOf = new Map(memories.map((m, i) => [m, i + 1]));
   const sourceMemoryById = new Map(memories.map(memory => [String(memory?.id ?? ''), memory]));
   const animaDedupe = await createAnimaDedupeSession({ enabled: options.animaDedupe ?? recallCfg.animaDedupe, context: ctx });
   const xiaobaixDedupe = await createXiaobaixDedupeSession({ enabled: options.xiaobaixDedupe ?? recallCfg.xiaobaixDedupe, context: ctx });
@@ -388,12 +389,12 @@ export async function runRecall() {
     if (m) return Number(m[2] || m[1]);
     return null;
   };
+  // 「最近」按记忆插件列表顺序判定（列表最底部 = 最新），与原文楼层是否丢失无关。
   const recentMems = RECENT_FLOORS > 0
-    ? dedupeByFingerprint(memories
-        .filter(m => m && m.priority !== 'high' && memMaxFloor(m) != null)
-        .sort((a, b) => (memMaxFloor(b) - memMaxFloor(a)) || ((b?.timestamp || 0) - (a?.timestamp || 0))))
+    ? dedupeByFingerprint(memories.filter(m => m && m.priority !== 'high').slice().reverse())
         .slice(0, RECENT_FLOORS)
-        .map(m => ({ ...m, _reason: `最近楼层记忆（最大楼层 #${memMaxFloor(m)}）` }))
+        .reverse()
+        .map(m => ({ ...m, _reason: `最近楼层记忆（记忆楼层 #${listFloorOf.get(m)}）` }))
     : [];
   const recentIds = new Set(recentMems.map(m => String(m?.id ?? '')).filter(Boolean));
   const recentPrints = new Set(recentMems.map(memFingerprint).filter(Boolean));

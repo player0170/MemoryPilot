@@ -376,10 +376,11 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   const two = await executeRecentFloors(runRecall, { recentFloors: 2 });
   assert.deepEqual(
     two.lines.slice(0, 2),
-    [fmt(byId['new-2']), fmt(byId['new-1'])],
-    `${version}: 应按楼层最大值（含 floorSegments）降序取前 2 条并置于 ctx 最前`,
+    [fmt(byId['new-2']), fmt(byId['nofloor-1'])],
+    `${version}: 应按记忆列表顺序取最底部 2 条（不依赖原文楼层）并置于 ctx 最前`,
   );
-  assert.equal(two.lines.filter(l => l === fmt(byId['new-1'])).length, 1, `${version}: 最近楼层记忆不应再被关键词召回重复发送`);
+  assert.equal(two.lines.filter(l => l === fmt(byId['nofloor-1'])).length, 1, `${version}: 最近楼层记忆不应再被关键词召回重复发送`);
+  assert.ok(two.lines.includes(fmt(byId['new-1'])), `${version}: 不在最近 N 条里的关键词命中记忆仍应召回`);
   assert.ok(two.lines.includes(fmt(byId['mid-1'])), `${version}: 其他命中关键词的记忆仍应正常召回`);
   assert.ok(two.lines.includes(fmt(byId['old-1'])), `${version}: 仅在摘要中标注 (#1-10) 的旧记忆仍应参与关键词召回`);
   assert.equal(two.pin, fmt(byId['pin-1']), `${version}: 常驻记忆不受最近楼层记忆影响`);
@@ -388,17 +389,15 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   // 不占用 maxRecall：maxRecall=1 时，除了 2 条最近楼层记忆，关键词召回仍可给出 1 条
   const tight = await executeRecentFloors(runRecall, { recentFloors: 2, maxRecall: 1 });
   assert.equal(tight.lines.length, 3, `${version}: 最近楼层记忆不应占用「最大触发召回数」名额`);
-  assert.deepEqual(tight.lines.slice(0, 2), [fmt(byId['new-2']), fmt(byId['new-1'])], `${version}: 名额收紧时最近楼层记忆仍完整注入`);
+  assert.deepEqual(tight.lines.slice(0, 2), [fmt(byId['new-2']), fmt(byId['nofloor-1'])], `${version}: 名额收紧时最近楼层记忆仍完整注入`);
 
   // 没有楼层范围的记忆不参与「最近楼层」，但可通过关键词召回
   const many = await executeRecentFloors(runRecall, { recentFloors: 10 });
-  const recentPart = many.lines.slice(0, 4);
   assert.deepEqual(
-    recentPart,
-    [fmt(byId['new-2']), fmt(byId['new-1']), fmt(byId['mid-1']), fmt(byId['old-1'])],
-    `${version}: 有楼层信息的非常驻记忆应全部按楼层降序进入最近楼层记忆`,
+    many.lines,
+    [fmt(byId['old-1']), fmt(byId['mid-1']), fmt(byId['new-1']), fmt(byId['new-2']), fmt(byId['nofloor-1'])],
+    `${version}: 全部非常驻记忆（含原文楼层丢失的）应按列表顺序进入最近楼层记忆，且不重复`,
   );
-  assert.deepEqual(many.lines.slice(4), [fmt(byId['nofloor-1'])], `${version}: 无楼层记忆只能通过关键词召回，且不重复`);
 
   // 非评估轮：最近楼层记忆仍注入，sticky 中与之重复的条目被剔除
   const stickyState = {
@@ -408,8 +407,8 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   const nonEval = await executeRecentFloors(runRecall, { recentFloors: 2, turnCounter: 1, every: 3, stickyState });
   assert.deepEqual(
     nonEval.lines,
-    [fmt(byId['new-2']), fmt(byId['new-1']), fmt(byId['mid-1'])],
-    `${version}: 非评估轮应先注入最近楼层记忆，再追加 sticky，且不重复 new-1`,
+    [fmt(byId['new-2']), fmt(byId['nofloor-1']), fmt(byId['new-1']), fmt(byId['mid-1'])],
+    `${version}: 非评估轮应先注入最近楼层记忆，再追加 sticky`,
   );
   assert.equal(nonEval.storedSticky['mid-1']?.turnsLeft, 2, `${version}: 非评估轮 sticky 衰减逻辑应保持不变`);
 }

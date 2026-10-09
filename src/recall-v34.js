@@ -366,6 +366,8 @@ export async function runRecall() {
     return;
   }
   memories = dedupeByFingerprint(memories);
+  // 记忆楼层 = 记忆列表中的顺序号（与面板列表一致）
+  const listFloorOf = new Map(memories.map((m, i) => [m, i + 1]));
   const sourceMemoryById = new Map(memories.map(memory => [String(memory?.id ?? ''), memory]));
   const animaDedupe = await createAnimaDedupeSession({ enabled: options.animaDedupe ?? recallCfg.animaDedupe, context: ctx });
   const xiaobaixDedupe = await createXiaobaixDedupeSession({ enabled: options.xiaobaixDedupe ?? recallCfg.xiaobaixDedupe, context: ctx });
@@ -388,12 +390,12 @@ export async function runRecall() {
     if (m) return Number(m[2] || m[1]);
     return null;
   };
+  // 「最近」按记忆插件列表顺序判定（列表最底部 = 最新），与原文楼层是否丢失无关。
   const recentMems = RECENT_FLOORS > 0
-    ? dedupeByFingerprint(memories
-        .filter(m => m && m.priority !== 'high' && memMaxFloor(m) != null)
-        .sort((a, b) => (memMaxFloor(b) - memMaxFloor(a)) || ((b?.timestamp || 0) - (a?.timestamp || 0))))
+    ? dedupeByFingerprint(memories.filter(m => m && m.priority !== 'high').slice().reverse())
         .slice(0, RECENT_FLOORS)
-        .map(m => ({ ...m, _reason: `最近楼层记忆（最大楼层 #${memMaxFloor(m)}）` }))
+        .reverse()
+        .map(m => ({ ...m, _reason: `最近楼层记忆（记忆楼层 #${listFloorOf.get(m)}）` }))
     : [];
   const recentIds = new Set(recentMems.map(m => String(m?.id ?? '')).filter(Boolean));
   const recentPrints = new Set(recentMems.map(memFingerprint).filter(Boolean));
@@ -471,6 +473,11 @@ export async function runRecall() {
   }).filter(Boolean);
 
   const contextText = recentTexts.join(' ');
+  // 用户最新一条发言（已按文本过滤清洗）：主关键词命中它时额外加权
+  const latestUserMsg = [...recent].reverse().find(m => m?.is_user);
+  const latestUserText = latestUserMsg
+    ? (cleanerCfg.cleanForRecall ? applyCleaner(latestUserMsg.mes || '', cleanerCfg) : String(latestUserMsg.mes || ''))
+    : '';
   const contextNorm = norm(contextText);
   const ctxWords = splitWords(contextText);
   const ctxTerms = extractTerms(contextText, 80);
@@ -619,7 +626,8 @@ export async function runRecall() {
     const isLow = mem.priority === 'low';
     const pw = isLow ? 0.15 : (mem.priority === 'medium' ? 0.5 : 0.3);
     const secondaryMul = secondaryMiss ? 0.4 : 1.0;
-    const keywordBase = (keywordScore * 0.65 + pw * 0.10 + freshness * 0.15) * secondaryMul;
+    const latestUserHit = !!latestUserText && keywordGate && primaryKws.some(k => exactMatchKeyword(latestUserText, k));
+    const keywordBase = (keywordScore * 0.65 + pw * 0.10 + freshness * 0.15) * secondaryMul + (latestUserHit ? 0.12 : 0);
     const vecScore = sim != null ? clamp(sim, 0, 1) : 0;
     let score;
     if (VEC_MODE === 'vector') score = vecScore * 0.75 + pw * 0.10 + freshness * 0.15;

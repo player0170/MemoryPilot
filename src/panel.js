@@ -642,10 +642,10 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
   const selectRecentFloorMemories = (list, count) => {
     const n = Math.max(0, Math.round(Number(count) || 0));
     if (!n) return [];
-    return dedupeMemories((Array.isArray(list) ? list : [])
-      .filter(m => m && m.priority !== 'high' && memoryMaxFloor(m) != null)
-      .sort((a, b) => (memoryMaxFloor(b) - memoryMaxFloor(a)) || ((b?.timestamp || 0) - (a?.timestamp || 0))))
-      .slice(0, n);
+    // 按记忆列表顺序取最近 N 条（列表最底部 = 最新），与原文楼层是否丢失无关
+    return dedupeMemories((Array.isArray(list) ? list : []).filter(m => m && m.priority !== 'high').slice().reverse())
+      .slice(0, n)
+      .reverse();
   };
 
   const getMergeContext = (mems) => {
@@ -995,7 +995,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     const pinned=[];
     if (!due) return { pinned:[], triggered:[], contextText, due:false, nextTurn, every:recallCfgLocal.every };
 
-    const recentMems = selectRecentFloorMemories(list, recallCfgLocal.recentFloors).map(m => ({ ...m, _reason: `最近楼层记忆（最大楼层 #${memoryMaxFloor(m)}）` }));
+    const recentMems = selectRecentFloorMemories(list, recallCfgLocal.recentFloors).map(m => ({ ...m, _reason: `最近楼层记忆（记忆楼层 #${list.findIndex(x => memoryId(x) === memoryId(m)) + 1}）` }));
     const recentIds = new Set(recentMems.map(m => String(m?.id ?? '')).filter(Boolean));
     const recentPrints = new Set(recentMems.map(memFingerprint).filter(Boolean));
     const isRecentMemory = (mem) => recentIds.has(String(mem?.id ?? '')) || recentPrints.has(memFingerprint(mem));
@@ -1370,6 +1370,8 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     #${P}.mp-dragging,#${P}.mp-dragging *{user-select:none!important;-webkit-user-select:none!important}
     #${P} .mhl{display:flex;align-items:center;gap:6px;min-width:0;flex:1}
     #${P} .mp-drag{cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;color:#777;font-size:15px;line-height:1;letter-spacing:-2px;padding:2px 4px 2px 0;flex-shrink:0}
+    #${P} .mp-dragcol{display:flex;flex-direction:column;align-items:flex-start;gap:1px;flex-shrink:0}
+    #${P} .mp-floor{font-size:10px;color:#a78bfa;white-space:nowrap;line-height:1.2}
     #${P} .mp-drag:hover{color:#c4b5fd}
     #${P} .mp-drag:active{cursor:grabbing}
     #${P} .sortactions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px}
@@ -2197,7 +2199,14 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
       const canRebuild = isRebuildableMemory(m);
       const pick = `<label class="ht mp-pick-wrap" title="选择此记忆"><input type="checkbox" class="mp_pick" aria-label="选择此记忆" data-id="${h(m.id)}" ${selectedIds.has(memoryId(m))?'checked':''}></label>`;
       const rebuildBtn = canRebuild ? `<button class="btn bp1" onclick="window._mpKR('${m.id}')">${kwRunning && kwRunningId===m.id ? '中止重构' : '优化关键词'}</button>` : '';
-      const dragHandle = `<span class="mp-drag" title="按住拖动调整顺序" role="button" aria-label="拖动排序">⋮⋮</span>`;
+      const memNo = memories.indexOf(m) + 1;
+      const fmtSeg = (a, b) => (b == null || Number(a) === Number(b)) ? `#${a}` : `#${a}-${b}`;
+      let srcFloorLabel = '';
+      if (Array.isArray(m.floorSegments) && m.floorSegments.length) srcFloorLabel = m.floorSegments.map(s => Array.isArray(s) ? fmtSeg(s[0], s[1]) : '').filter(Boolean).join(', ');
+      else if (Array.isArray(m.floorRange) && m.floorRange.length) srcFloorLabel = fmtSeg(m.floorRange[0], m.floorRange[1]);
+      else { const fm = String(m.summary || '').match(/\(#(\d+)(?:-(\d+))?\)/); if (fm) srcFloorLabel = fmtSeg(fm[1], fm[2]); }
+      const floorBadge = `<span class="mp-floor" title="记忆楼层 = 该记忆在记忆列表中的顺序（列表最底部 = 最新），「最近楼层记忆」按它取值；原文楼层 = 这条总结对应的聊天楼层">记忆 #${memNo}${srcFloorLabel ? ` · 原文 ${h(srcFloorLabel)}` : ' · <b style="color:#fbbf24">原文楼层丢失 ⚠</b>'}</span>`;
+      const dragHandle = `<div class="mp-dragcol">${floorBadge}<span class="mp-drag" title="按住拖动调整顺序" role="button" aria-label="拖动排序">⋮⋮</span></div>`;
       return `<div class="mi" data-mid="${h(m.id)}"><div class="mh"><div class="mhl">${dragHandle}<span class="me jump" title="跳转到完整列表中的位置" onclick="window._mpJump('${m.id}')">${pin}${h(m.event)}</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${pick}<span class="bp ${pc}">${pl}</span></div></div>${time}<div class="ms">${h(m.summary)}</div><div class="kr">${src}${pkw}${skw}${ent}</div><div class="ma">${rebuildBtn}<button class="btn" onclick="window._mpE('${m.id}')">编辑</button><button class="btn bd1" onclick="window._mpD('${m.id}')">删除</button></div></div>`;
     }).join('');
     updateSelectionUI();

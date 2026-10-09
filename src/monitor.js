@@ -57,7 +57,15 @@ export async function openMonitor() {
     const triggeredTitle = emb && emb.active ? (emb.mode === 'vector' ? '向量触发记忆' : '关键词 / 向量触发记忆') : '关键词触发记忆';
     byId('mpr_summary').textContent = `最近一次召回${snap.savedAt ? `（${new Date(snap.savedAt).toLocaleTimeString()}）` : ''}`;
     byId('mpr_rules').innerHTML = `<div>每 ${esc(snap.recallEvery || 1)} 轮重新匹配，读取最近 ${esc(snap.contextWindow || sources.length)} 条聊天。</div><div class="row"><div class="setting">最多召回 ${esc(snap.maxRecall || 6)} 条</div><div class="setting">命中后保留 ${esc(snap.stickyTurns ?? 5)} 轮</div><div class="setting">最近楼层记忆：${recentFloors > 0 ? `${esc(recentFloors)} 条` : '关闭'}</div><div class="setting">Anima 去重：${snap.animaDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">小白 X 去重：${snap.xiaobaixDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">${embSetting}</div></div>${embNote}`;
-    byId('mpr_sources').innerHTML = sources.length ? sources.map(item => `<article class="item"><b>#${esc(item.floor)} ${esc(item.speaker)}</b><div>${esc(item.raw || '（空）')}</div></article>`).join('') : '<div class="muted">本轮没有可用于匹配的聊天内容。</div>';
+    // 展示经「文本过滤」处理后的实际匹配文本；旧快照没有 cleaned 字段时回退原文
+    byId('mpr_sources').innerHTML = sources.length ? sources.map(item => {
+      const hasCleaned = typeof item.cleaned === 'string';
+      const shown = hasCleaned ? item.cleaned : item.raw;
+      const changed = hasCleaned && String(item.cleaned).trim() !== String(item.raw || '').trim();
+      const tag = hasCleaned ? (changed ? ' <span class="muted">（已应用文本过滤，已过滤 ' + Math.max(0, String(item.raw || '').length - String(item.cleaned).length) + ' 字）</span>' : ' <span class="muted">（文本过滤未改动此条）</span>') : '';
+      const orig = changed ? `<details><summary class="muted">查看原文</summary><div>${esc(item.raw || '（空）')}</div></details>` : '';
+      return `<article class="item"><b>#${esc(item.floor)} ${esc(item.speaker)}</b>${tag}<div>${esc(shown || '（过滤后为空）')}</div>${orig}</article>`;
+    }).join('') : '<div class="muted">本轮没有可用于匹配的聊天内容。</div>';
     byId('mpr_results').innerHTML = renderList('常驻记忆', pinned) + (recentFloors > 0 ? renderList('最近楼层记忆', recent) : '') + renderList(triggeredTitle, triggered);
   };
   byId('mpr_close').onclick = () => { root.remove(); style.remove(); };
