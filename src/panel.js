@@ -2930,6 +2930,11 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
   root.querySelectorAll('.tab').forEach(t=>{t.onclick=()=>{
     activateTab(t.dataset.t);
   };});
+  // 顶部「记忆管理」：从召回设置 / 文本过滤 / 数据管理（cfg 页）点回来时切回记忆列表
+  root.querySelector('[data-hub="memory"]')?.addEventListener('click', () => {
+    activateTab('list');
+    root.querySelector('.bd')?.scrollTo({ top: 0, behavior: 'smooth' });
+  });
   if (['list', 'add', 'xb', 'anima', 'horae', 'batch', 'cfg'].includes(initialTab)) activateTab(initialTab);
 
   $('mp_sv').onclick=async()=>{
