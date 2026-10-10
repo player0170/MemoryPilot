@@ -1894,9 +1894,12 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
           <div class="ht" style="margin-bottom:10px">这些词不会参与召回匹配。使用逗号或换行分隔；加入黑名单不会影响人物关键词的显示。</div>
           <button class="btn bp1" id="mp_blsv" style="width:100%;padding:9px;font-size:13px">保存关键词黑名单</button>
           <div class="cfgtitle" style="margin-top:18px">文本清洗</div>
-          <div class="ht" style="margin-bottom:12px">插件在匹配记忆关键词或总结楼层前，会按照下方规则删除不需要参与处理的内容。文本清洗只影响插件读取到的文本，不会修改聊天原文。</div>
+          <div class="ht" style="margin-bottom:12px">插件在匹配记忆关键词或总结楼层前，会按照下方规则处理聊天文本。两个框二选一：填了「只保留」就只用只保留，下方「过滤规则」自动灰掉不生效；清空「只保留」则恢复按「过滤规则」删除。文本清洗只影响插件读取到的文本，不会修改聊天原文。</div>
+          <div class="fg"><label>只保留这些标签 / 正则的内容（白名单，每行一条；留空 = 不启用）</label><div class="ht" style="margin:4px 0 7px;line-height:1.65">只想让插件看到某几个标签里的内容时用这个，不用再把其它标签一个个排除：<br>· <b>纯英文</b>（例如 content、summary）→ 只保留 &lt;content&gt;…&lt;/content&gt; 内部的文字（允许标签带属性，大小写不敏感）；<br>· <b>其它内容</b> → 正则，保留匹配到的文字（写了捕获组则只保留第 1 个捕获组）。<br>所有命中片段按原文顺序拼接；一条都没命中的消息会被视为空文本（不参与匹配 / 总结）。</div><textarea class="cleaneditor" id="mp_ckeep" style="min-height:80px" placeholder="content&#10;summary">${h(loadCleaner().keepTags.join('\n'))}</textarea><div class="ht" id="mp_ckeep_hint" style="margin-top:4px"></div></div>
+          <div id="mp_crules_wrap">
           <div class="fg"><label>过滤规则（标签 / 正则，每行一条）</label><div class="ht" style="margin:4px 0 7px;line-height:1.65">每行一条规则，插件自动识别类型：<br>· <b>纯英文</b>（字母开头，只含字母 / 数字 / _ / -，例如 think、details、meta）→ 当作标签名，删除 &lt;think&gt;…&lt;/think&gt; 整块（允许标签带属性，大小写不敏感）；<br>· <b>其它任何内容</b> → 直接当作正则表达式使用，不需要两侧的 /，按 gim 执行，例如 &lt;!--[\s\S]*?--&gt;、&lt;echo&gt;[\s\S]*?&lt;\/echo&gt;；要删除以某个词开头的整行，写 ^\s*affinity_change:.*$。<br>规则按填写顺序执行，所有规则跑完后会再整体跑一遍（处理删掉标签后才露出来的内容）。每条规则彼此独立：某一条无效或没匹配到，不影响其它规则。</div><textarea class="cleaneditor" id="mp_crules" style="min-height:150px">${h(loadCleaner().rules.join('\n'))}</textarea><div class="ht" id="mp_crules_hint" style="margin-top:4px"></div></div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px"><button class="btn" id="mp_clreset" style="flex:1;padding:7px;font-size:12px" title="把规则框恢复为内置默认规则（不会自动保存）">恢复默认规则</button></div>
+          </div>
           <div class="fg">
             <label>作用范围</label>
             <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
@@ -3455,17 +3458,32 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
   };
 
   // 读取规则框：每行一条，纯英文 = 标签，其它 = 正则（类型由 cleaner.js 的 ruleKind 判定）
-  const readCleanerRules = () => Array.from(new Set($('mp_crules').value.split(/\n/).map(s=>s.trim()).filter(Boolean)));
-  // 规则框下方实时提示：识别出几条标签 / 几条正则、哪些正则无法编译
-  const refreshCleanerHint = () => {
-    const hint=$('mp_crules_hint'); if(!hint) return;
-    const rules=readCleanerRules();
+  const readRuleLines = (id) => Array.from(new Set(($(id)?.value||'').split(/\n/).map(s=>s.trim()).filter(Boolean)));
+  const readCleanerRules = () => readRuleLines('mp_crules');
+  const readKeepRules = () => readRuleLines('mp_ckeep');
+  const describeRules = (rules, verb) => {
     const tags=rules.filter(r=>ruleKind(r)==='tag');
     const regs=rules.filter(r=>ruleKind(r)==='regex');
     const invalid=regs.filter(r=>compileRule(r)==null);
-    hint.innerHTML = `已识别：标签 ${tags.length} 条${tags.length?`（${h(tags.join('、'))}）`:''} · 正则 ${regs.length} 条${invalid.length?`<span style="color:#f87171"> · ${invalid.length} 条正则无法编译，将被跳过：${h(invalid.join(' ｜ '))}</span>`:''}`;
+    return `已识别：标签 ${tags.length} 条${tags.length?`（${verb}${h(tags.map(t=>`&lt;${t}&gt;`).join('、'))}）`:''} · 正则 ${regs.length} 条${invalid.length?`<span style="color:#f87171"> · ${invalid.length} 条正则无法编译，将被跳过：${h(invalid.join(' ｜ '))}</span>`:''}`;
+  };
+  // 两个框下方的实时提示 + 互斥：「只保留」有内容时，「过滤规则」整块灰掉且不可编辑
+  const refreshCleanerHint = () => {
+    const keep=readKeepRules();
+    const keepOn=keep.length>0;
+    const wrap=$('mp_crules_wrap');
+    if(wrap){ wrap.style.opacity=keepOn?'.45':''; wrap.style.pointerEvents=keepOn?'none':''; wrap.title=keepOn?'已填写「只保留」规则，过滤规则不生效；清空「只保留」框后恢复':''; }
+    const rulesBox=$('mp_crules'); if(rulesBox) rulesBox.disabled=keepOn;
+    const resetBtn=$('mp_clreset'); if(resetBtn) resetBtn.disabled=keepOn;
+    const keepHint=$('mp_ckeep_hint');
+    if(keepHint) keepHint.innerHTML = keepOn
+      ? `<span style="color:#4ade80">只保留模式已启用</span>，下方「过滤规则」不生效。${describeRules(keep,'只保留 ')}`
+      : '未启用（留空），按下方「过滤规则」删除内容。';
+    const hint=$('mp_crules_hint');
+    if(hint) hint.innerHTML = (keepOn?'<span style="color:#fbbf24">已被「只保留」接管，这些规则暂不生效。</span>':'') + describeRules(readCleanerRules(),'删除 ');
   };
   $('mp_crules').oninput = refreshCleanerHint;
+  $('mp_ckeep').oninput = refreshCleanerHint;
   refreshCleanerHint();
   $('mp_clreset').onclick=()=>{
     $('mp_crules').value = DEF_CLEANER.rules.join('\n');
@@ -3474,30 +3492,38 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
   };
   $('mp_clsv').onclick=async()=>{
     const cfg = {
+      keepTags: readKeepRules(),
       rules: readCleanerRules(),
       cleanForRecall: !!$('mp_c_recall').checked,
       cleanForBatch: !!$('mp_c_batch').checked
     };
     await saveCleaner(cfg);
     refreshCleanerHint();
-    toastr?.success?.('文本清洗规则已保存');
+    toastr?.success?.(cfg.keepTags.length ? '文本清洗规则已保存（只保留模式）' : '文本清洗规则已保存');
   };
   $('mp_cltest').onclick=()=>{
     const out=$('mp_cltest_out'); if(!out) return;
-    const cfg = { rules: readCleanerRules(), cleanForRecall: true, cleanForBatch: true };
+    const keepTags=readKeepRules();
+    const cfg = { keepTags, rules: readCleanerRules(), cleanForRecall: true, cleanForBatch: true };
+    const keepOn=keepTags.length>0;
     const last = [...(ctx?.chat||[])].reverse().find(m=>m && String(m.mes||'').trim());
     out.style.display='block';
     if(!last){ out.textContent='当前聊天没有可测试的消息。'; return; }
     const raw=String(last.mes||'');
     const stats={ rules:{} };
     const cleaned=applyCleaner(raw,cfg,stats);
-    // 逐条列出每个规则的命中情况，方便定位到底是哪一条没有匹配上
-    const lines=cfg.rules.map(r=>{
+    // 逐条列出每个规则的命中情况，方便定位到底是哪一条没有匹配上（只保留模式下列的是白名单规则）
+    const activeRules = keepOn ? keepTags : cfg.rules;
+    const lines=activeRules.map(r=>{
       const kind = ruleKind(r)==='tag' ? `标签 <${r}>` : `正则 ${r}`;
       if(compileRule(r)==null) return `✖ 无效正则（已跳过）  ${kind}`;
       return `${stats.rules[r]?`✔ 命中 ${stats.rules[r]} 处`:'─ 未命中（这条消息里没有可匹配内容）'}  ${kind}`;
     });
-    const head = `最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${raw.trim()===cleaned.trim()?'（规则没有改动此条）':`（已过滤 ${raw.length-cleaned.length} 字）`}\n──── 逐条规则命中情况（每条独立执行，互不影响） ────\n${lines.join('\n')||'（没有规则）'}\n──── 过滤后文本 ────\n`;
+    const modeLine = keepOn ? `模式：只保留（白名单 ${keepTags.length} 条，「过滤规则」不生效）` : `模式：删除（过滤规则 ${cfg.rules.length} 条）`;
+    const changeNote = raw.trim()===cleaned.trim()
+      ? '（规则没有改动此条）'
+      : keepOn ? `（只保留了命中片段${cleaned?'':'；一条都没命中，此消息将被视为空'}）` : `（已过滤 ${raw.length-cleaned.length} 字）`;
+    const head = `${modeLine}\n最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${changeNote}\n──── 逐条规则命中情况（每条独立执行，互不影响） ────\n${lines.join('\n')||'（没有规则）'}\n──── 过滤后文本 ────\n`;
     out.textContent = head + (cleaned || '（过滤后为空）');
   };
 

@@ -506,6 +506,21 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   }
   assert.ok(legacySrc.cleaned.includes('正文结尾。'), `${version}: 迁移后的旧配置不应误删正文`);
   assert.equal(legacySnap.cleaner?.stats?.rules[String.raw`^\s*affinity_change:.*$`], 1, `${version}: 整行前缀迁移成的正则应命中 1 次`);
+
+  // 「只保留」白名单：填写后删除规则整体失效，只保留白名单标签 / 正则命中的内容
+  const keepSnap = await executeCleaner(runRecall, { keepTags: ['echo', 'summary', String.raw`<letter>([\s\S]*?)<\/letter>`, '[unclosed'], rules: unifiedRules, cleanForRecall: true, cleanForBatch: true });
+  const keepSrc = keepSnap.sources?.[0];
+  assert.equal(keepSnap.cleaner?.mode, 'keep', `${version}: 填写只保留白名单后快照应记录 keep 模式`);
+  assert.deepEqual(keepSnap.cleaner?.keepTags, ['echo', 'summary', String.raw`<letter>([\s\S]*?)<\/letter>`, '[unclosed'], `${version}: 快照应记录白名单规则`);
+  assert.deepEqual(keepSnap.cleaner?.invalidRules, ['[unclosed'], `${version}: 只保留模式下无效规则应来自白名单`);
+  assert.equal(keepSrc.cleaned, '第三章\n\nECHO_BODY\n\nLETTER_BODY', `${version}: 只保留模式应按原文顺序只拼接白名单命中的内容（summary 在 echo 之前）`);
+  for (const marker of ['正文开头', 'THINK_BODY', 'EPISODE_BODY', 'DANMU_A', 'GOSSIP_BODY', 'PREFIX_LINE', '<echo>', '<letter>']) {
+    assert.ok(!keepSrc.cleaned.includes(marker), `${version}: 只保留模式下白名单之外的内容 ${marker} 不应出现`);
+  }
+  assert.equal(keepSnap.cleaner?.stats?.mode, 'keep', `${version}: stats 应标记 keep 模式`);
+  assert.equal(keepSnap.cleaner?.stats?.rules.echo, 1, `${version}: 白名单标签 echo 应命中 1 次`);
+  assert.equal(keepSnap.cleaner?.stats?.rules.summary, 1, `${version}: 白名单标签 summary 应命中 1 次`);
+  assert.equal(keepSnap.cleaner?.stats?.rules.think, undefined, `${version}: 只保留模式下删除规则不应执行`);
 }
 
 // cleaner.js 默认规则：旧版默认的标签 / 整行前缀 / 正则都还在
@@ -518,6 +533,22 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
     assert.ok(!out.includes(marker), `默认规则应删除 think / details 整块、mood_change 整行和下划线行，不应残留 ${marker}`);
   }
   assert.ok(out.startsWith('开头') && out.endsWith('结尾'), '默认规则不应误删正文');
+
+  // 「只保留」白名单：默认为空（不启用）；填写后只保留标签内部内容，其它全部丢弃，删除规则不再生效
+  const { cleanerMode, activeCleanerRules } = await import('../src/cleaner.js');
+  assert.deepEqual(normalizeCleaner(undefined).keepTags, [], '白名单默认为空');
+  assert.equal(cleanerMode(undefined), 'remove', '白名单为空时是删除模式');
+  const keepCfg = { keepTags: ['content', 'summary'], rules: ['think'] };
+  assert.equal(cleanerMode(keepCfg), 'keep', '填写白名单后是只保留模式');
+  assert.deepEqual(activeCleanerRules(keepCfg), ['content', 'summary'], '只保留模式下生效规则是白名单');
+  const keepStats = { rules: {} };
+  const kept = applyCleaner('开头废话\n<think>T</think>\n<CONTENT lang="zh">正文一</CONTENT>\n<echo>E</echo>\n<summary>摘要</summary>\n<content>正文二</content>\n结尾废话', keepCfg, keepStats);
+  assert.equal(kept, '正文一\n\n摘要\n\n正文二', '只保留 content / summary 内部内容，按原文顺序拼接，标签大小写不敏感且允许属性');
+  assert.equal(keepStats.mode, 'keep');
+  assert.deepEqual(keepStats.rules, { content: 2, summary: 1 }, '白名单逐条统计命中次数，删除规则 think 不执行');
+  assert.equal(applyCleaner('没有任何标签的消息', keepCfg), '', '一条白名单都没命中时结果为空');
+  assert.equal(applyCleaner('<a>x</a> 正文 <summary>s</summary>', { keepTags: ['正文'] }), '正文', '白名单正则保留匹配到的文字');
+  assert.equal(applyCleaner('<think>T</think>正文', { keepTags: [], rules: ['think'] }), '正文', '清空白名单后恢复删除模式');
 }
 
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');

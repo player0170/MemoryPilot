@@ -68,9 +68,14 @@ export async function openMonitor() {
       const invalid = Array.isArray(cleaner.invalidRules) ? cleaner.invalidRules : [];
       // 新版快照只有统一的 rules；旧快照是三栏（regexRules / blockTags / linePrefixes），合并后一起展示
       const legacy = !Array.isArray(cleaner.rules);
-      const rules = legacy
-        ? [...(Array.isArray(cleaner.regexRules) ? cleaner.regexRules : []), ...(Array.isArray(cleaner.blockTags) ? cleaner.blockTags : []), ...(Array.isArray(cleaner.linePrefixes) ? cleaner.linePrefixes : [])]
-        : cleaner.rules;
+      // 「只保留」白名单有内容时，本轮生效的是 keepTags，删除规则整体不生效
+      const keepTags = Array.isArray(cleaner.keepTags) ? cleaner.keepTags : [];
+      const keepOn = cleaner.mode === 'keep' || (cleaner.mode == null && keepTags.length > 0);
+      const rules = keepOn
+        ? keepTags
+        : legacy
+          ? [...(Array.isArray(cleaner.regexRules) ? cleaner.regexRules : []), ...(Array.isArray(cleaner.blockTags) ? cleaner.blockTags : []), ...(Array.isArray(cleaner.linePrefixes) ? cleaner.linePrefixes : [])]
+          : cleaner.rules;
       if (cleaner.cleanForRecall === false) {
         cleanerHead = '<div class="setting" style="margin-bottom:8px;color:#fbbf24">⚠ 「召回匹配前清洗」已关闭，本轮按聊天原文匹配，文本过滤规则没有生效。可在 设置 → 文本过滤 → 作用范围 中开启。</div>';
       } else {
@@ -78,7 +83,7 @@ export async function openMonitor() {
         const stats = cleaner.stats && typeof cleaner.stats === 'object' ? cleaner.stats : null;
         const hitOf = (r) => stats ? Number(stats.rules?.[r] ?? stats.tags?.[r] ?? stats.prefixes?.[String(r).toLowerCase()] ?? 0) : null;
         const hitTag = (n) => n == null ? '' : (n ? `<span style="color:#4ade80">✔ 命中 ${esc(n)} 处</span>` : '<span class="muted">─ 未命中（本轮聊天里没有可匹配内容）</span>');
-        const kindOf = (r) => legacy
+        const kindOf = (r) => (legacy && !keepOn)
           ? ((cleaner.blockTags || []).includes(r) ? '标签' : (cleaner.linePrefixes || []).includes(r) ? '整行前缀' : '正则')
           : (ruleKind(r) === 'tag' ? '标签' : '正则');
         const ruleList = rules.length ? rules.map(r => {
@@ -88,14 +93,23 @@ export async function openMonitor() {
         }).join('') : '<li class="muted">（无）</li>';
         const tagCount = rules.filter(r => kindOf(r) === '标签').length;
         const hitRules = stats ? rules.filter(r => hitOf(r)).length : null;
-        cleanerHead = `<details open style="margin-bottom:8px"><summary class="muted">本轮生效的文本过滤规则：共 ${esc(rules.length)} 条（标签 ${esc(tagCount)} · 正则 ${esc(rules.length - tagCount)}）${hitRules != null ? ` · 命中 ${esc(hitRules)} 条` : ''}${invalid.length ? ` · <span style="color:#f87171">${esc(invalid.length)} 条正则无效</span>` : ''}</summary><div class="body"><div class="muted">纯英文规则 = 删除该标签整块，其它 = 正则。按填写顺序执行，跑完再整体跑一遍；每条规则独立，某一条无效或未命中不影响其余规则。</div><ul style="margin:4px 0 0 18px;padding:0;word-break:break-all">${ruleList}</ul></div></details>`;
+        const title = keepOn ? `本轮文本过滤：<span style="color:#4ade80">只保留模式</span>，白名单 ${esc(rules.length)} 条（标签 ${esc(tagCount)} · 正则 ${esc(rules.length - tagCount)}）` : `本轮生效的文本过滤规则：共 ${esc(rules.length)} 条（标签 ${esc(tagCount)} · 正则 ${esc(rules.length - tagCount)}）`;
+        const note = keepOn
+          ? '只保留白名单命中的内容：纯英文规则 = 只保留该标签内部文字，其它 = 正则（有捕获组取第 1 组）。命中片段按原文顺序拼接；一条都没命中的消息视为空。「过滤规则」删除列表本轮不生效。'
+          : '纯英文规则 = 删除该标签整块，其它 = 正则。按填写顺序执行，跑完再整体跑一遍；每条规则独立，某一条无效或未命中不影响其余规则。';
+        cleanerHead = `<details open style="margin-bottom:8px"><summary class="muted">${title}${hitRules != null ? ` · 命中 ${esc(hitRules)} 条` : ''}${invalid.length ? ` · <span style="color:#f87171">${esc(invalid.length)} 条正则无效</span>` : ''}</summary><div class="body"><div class="muted">${note}</div><ul style="margin:4px 0 0 18px;padding:0;word-break:break-all">${ruleList}</ul></div></details>`;
       }
     }
     byId('mpr_sources').innerHTML = sources.length ? cleanerHead + sources.map(item => {
       const hasCleaned = typeof item.cleaned === 'string';
       const shown = hasCleaned ? item.cleaned : item.raw;
       const changed = hasCleaned && String(item.cleaned).trim() !== String(item.raw || '').trim();
-      const tag = hasCleaned ? (changed ? ' <span class="muted">（已应用文本过滤，已过滤 ' + Math.max(0, String(item.raw || '').length - String(item.cleaned).length) + ' 字）</span>' : ' <span class="muted">（文本过滤未改动此条）</span>') : ' <span style="color:#fbbf24">（原文，未经过滤）</span>';
+      const keepMode = cleaner && (cleaner.mode === 'keep' || (cleaner.mode == null && Array.isArray(cleaner.keepTags) && cleaner.keepTags.length > 0));
+      const tag = hasCleaned
+        ? (changed
+          ? (keepMode ? ` <span class="muted">（只保留模式：保留 ${String(item.cleaned).length} 字 / 原文 ${String(item.raw || '').length} 字${String(item.cleaned).trim() ? '' : '，没有命中任何白名单规则'}）</span>` : ' <span class="muted">（已应用文本过滤，已过滤 ' + Math.max(0, String(item.raw || '').length - String(item.cleaned).length) + ' 字）</span>')
+          : ' <span class="muted">（文本过滤未改动此条）</span>')
+        : ' <span style="color:#fbbf24">（原文，未经过滤）</span>';
       const orig = changed ? `<details><summary class="muted">查看原文</summary><div>${esc(item.raw || '（空）')}</div></details>` : '';
       return `<article class="item"><b>#${esc(item.floor)} ${esc(item.speaker)}</b>${tag}<div>${esc(shown || '（过滤后为空）')}</div>${orig}</article>`;
     }).join('') : '<div class="muted">本轮没有可用于匹配的聊天内容。</div>';

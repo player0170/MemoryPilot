@@ -415,7 +415,7 @@ export async function runRecall() {
       version: 'v34', evaluated: !!evaluated, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
       maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5, recentFloors: RECENT_FLOORS,
       embedding: embeddingInfo,
-      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, rules: cleanerCfg.rules, invalidRules: invalidCleanerRules(cleanerCfg), stats: cleanerStats },
+      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, mode: cleanerCfg.keepTags.length ? 'keep' : 'remove', keepTags: cleanerCfg.keepTags, rules: cleanerCfg.rules, invalidRules: invalidCleanerRules(cleanerCfg), stats: cleanerStats },
       animaDedupeEnabled: recallCfg.animaDedupe !== false, animaDedupeActive: !!animaDedupe.active,
       animaDedupeRemoved: animaDedupe.removedIds?.size || 0,
       xiaobaixDedupeEnabled: recallCfg.xiaobaixDedupe !== false, xiaobaixDedupeActive: !!xiaobaixDedupe.active,

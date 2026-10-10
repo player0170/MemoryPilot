@@ -12,10 +12,16 @@
 //
 // 旧版配置（blockTags / linePrefixes / regexRules）在 normalizeCleaner 中自动迁移：
 // 标签原样保留，整行前缀转换为 ^\s*前缀.*$ 正则，正则原样保留。
+//
+// 另有一个「只保留」白名单 keepTags（与 rules 互斥，填写后 rules 不再生效）：
+//   - 纯英文 → 只保留 <tag ...>…</tag> 内部的内容；
+//   - 其它 → 正则，保留匹配到的内容（有捕获组时保留第 1 个捕获组）。
+// 所有保留规则命中的片段按出现顺序拼接成新文本；一条都没命中时结果为空。
 
 export const TAG_RULE_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export const DEF_CLEANER = Object.freeze({
+  keepTags: Object.freeze([]),
   rules: Object.freeze([
     'think',
     'details',
@@ -37,17 +43,23 @@ export const prefixToRule = (prefix) => String.raw`^\s*` + escapeRegExp(String(p
 // 判断一条规则是「标签」还是「正则」
 export const ruleKind = (rule) => (TAG_RULE_RE.test(String(rule ?? '').trim()) ? 'tag' : 'regex');
 
-// 把一条规则编译成 RegExp；编译失败返回 null
+// 把一条规则编译成 RegExp；编译失败返回 null。
+// 标签规则统一把内部内容放进第 1 个捕获组，删除模式忽略它、保留模式取它。
 export const compileRule = (rule) => {
   const r = String(rule ?? '').trim();
   if (!r) return null;
   try {
-    if (ruleKind(r) === 'tag') return new RegExp('<\\s*' + r + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + r + '\\s*>', 'gi');
+    if (ruleKind(r) === 'tag') return new RegExp('<\\s*' + r + '\\b[^>]*>([\\s\\S]*?)<\\s*\\/\\s*' + r + '\\s*>', 'gi');
     return new RegExp(r, 'gim');
   } catch {
     return null;
   }
 };
+
+// 当前生效的是哪种模式：填写了 keepTags → 'keep'（只保留），否则 → 'remove'（删除）
+export const cleanerMode = (cfg) => (normalizeCleaner(cfg).keepTags.length ? 'keep' : 'remove');
+// 当前生效的规则列表（keep 模式下是 keepTags，否则是 rules）
+export const activeCleanerRules = (cfg) => { const c = normalizeCleaner(cfg); return c.keepTags.length ? c.keepTags : c.rules; };
 
 export function normalizeCleaner(cfg) {
   const src = cfg && typeof cfg === 'object' ? cfg : {};
@@ -64,6 +76,7 @@ export function normalizeCleaner(cfg) {
     rules = [...DEF_CLEANER.rules];
   }
   return {
+    keepTags: normList(src.keepTags ?? src.onlyTags),
     rules,
     cleanForRecall: src.cleanForRecall !== false,
     cleanForBatch: src.cleanForBatch !== false,
@@ -72,14 +85,42 @@ export function normalizeCleaner(cfg) {
 
 export const newCleanerStats = () => ({ rules: {} });
 
-// 列出无法编译的规则（只可能是正则），供监控 / 测试按钮提示
-export const invalidCleanerRules = (cfg) => normalizeCleaner(cfg).rules.filter(rule => compileRule(rule) == null);
+// 列出当前生效规则里无法编译的规则（只可能是正则），供监控 / 测试按钮提示
+export const invalidCleanerRules = (cfg) => activeCleanerRules(cfg).filter(rule => compileRule(rule) == null);
+
+const finish = (text) => String(text).replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+
+// 「只保留」模式：把每条保留规则命中的片段按在原文中的出现顺序拼起来
+function applyKeepRules(text, keepTags, bucket) {
+  const compiled = keepTags.map(rule => ({ rule, re: compileRule(rule) })).filter(x => x.re);
+  const pieces = [];
+  for (const { rule, re } of compiled) {
+    let hits = 0;
+    try {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (m[0] === '') { re.lastIndex++; continue; }
+        const piece = (m.length > 1 && m[1] != null) ? m[1] : m[0];
+        if (String(piece).trim()) pieces.push({ at: m.index, piece: String(piece) });
+        hits++;
+        if (!re.global) break;
+      }
+    } catch {}
+    if (bucket) bucket[rule] = (bucket[rule] || 0) + hits;
+  }
+  pieces.sort((a, b) => a.at - b.at);
+  return finish(pieces.map(p => p.piece.trim()).join('\n\n'));
+}
 
 export function applyCleaner(input, cfg, stats = null) {
   let text = String(input ?? '');
   const conf = normalizeCleaner(cfg);
-  const compiled = conf.rules.map(rule => ({ rule, re: compileRule(rule) })).filter(x => x.re);
   const bucket = stats && typeof stats === 'object' ? (stats.rules = stats.rules || {}) : null;
+  if (stats && typeof stats === 'object') stats.mode = conf.keepTags.length ? 'keep' : 'remove';
+  // 白名单优先：填写了「只保留」规则时，删除规则整体不生效
+  if (conf.keepTags.length) return applyKeepRules(text, conf.keepTags, bucket);
+  const compiled = conf.rules.map(rule => ({ rule, re: compileRule(rule) })).filter(x => x.re);
   const runAll = () => {
     for (const { rule, re } of compiled) {
       let hits = 0;
@@ -90,5 +131,5 @@ export function applyCleaner(input, cfg, stats = null) {
   runAll();
   // 再跑一遍：处理只有在标签删除之后才会暴露出来的内容（如 ^____+$）
   runAll();
-  return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+  return finish(text);
 }
