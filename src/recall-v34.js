@@ -6,6 +6,7 @@ import { createXiaobaixDedupeSession } from './xiaobaix-dedupe.js';
 import { saveRecallSnapshot } from './recall-monitor-state.js';
 import { getChatScopeKey } from './chat-scope.js';
 import { loadEmbeddingCfg, isEmbeddingReady, embedQuery, getMemoryVectors, cosineSimilarity } from './embedding.js';
+import { DEF_CLEANER, normalizeCleaner, applyCleaner, newCleanerStats, invalidCleanerRules } from './cleaner.js';
 
 export async function runRecall() {
   const options = arguments[0] || {};
@@ -173,72 +174,7 @@ export async function runRecall() {
     } catch {}
   };
 
-  const DEF_CLEANER = {
-    blockTags: ['think','details'],
-    linePrefixes: ['affinity_change:','mood_change:','state_update:'],
-    regexRules: ['^____+$'],
-    cleanForRecall: true,
-    cleanForBatch: true
-  };
-  const normalizeCleaner = (cfg) => {
-    const src = cfg && typeof cfg === 'object' ? cfg : {};
-    const normList = (arr) => Array.from(new Set((Array.isArray(arr) ? arr : []).map(x => String(x ?? '').trim()).filter(Boolean)));
-    return {
-      blockTags: normList(src.blockTags || DEF_CLEANER.blockTags),
-      linePrefixes: normList(src.linePrefixes || DEF_CLEANER.linePrefixes),
-      regexRules: normList(src.regexRules || DEF_CLEANER.regexRules),
-      cleanForRecall: src.cleanForRecall !== false,
-      cleanForBatch: src.cleanForBatch !== false
-    };
-  };
-  // 每条规则（正则 / 标签 / 整行前缀）彼此独立：某一条编译失败或正文里没有可匹配内容，
-  // 只影响它自己，其余规则照常执行。stats 可选，用于统计每条规则的命中次数（监控 / 测试按钮）。
-  const bump = (bucket, key, n) => { if (bucket) bucket[key] = (bucket[key] || 0) + n; };
-  const applyCleaner = (input, cfg, stats = null) => {
-    let text = String(input ?? '');
-    const conf = normalizeCleaner(cfg);
-    // 用户正则先于内置标签删除执行（否则依赖内部 <details> 的规则会匹配不上），删完标签/整行后再跑一遍
-    const runRegexRules = () => {
-      for (const rawRule of conf.regexRules) {
-        const rule = String(rawRule || '').trim();
-        if (!rule) continue;
-        let re;
-        try { re = new RegExp(rule, 'gim'); } catch { continue; }
-        let hits = 0;
-        try { text = text.replace(re, () => { hits++; return ' '; }); } catch {}
-        bump(stats?.rules, rule, hits);
-      }
-    };
-    runRegexRules();
-    for (const rawTag of conf.blockTags) {
-      const tag = String(rawTag || '').trim();
-      if (!tag) continue;
-      try {
-        const re = new RegExp('<\\s*' + tag + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + tag + '\\s*>', 'gi');
-        let hits = 0;
-        text = text.replace(re, () => { hits++; return ' '; });
-        bump(stats?.tags, tag, hits);
-      } catch {}
-    }
-    if (conf.linePrefixes.length) {
-      const prefixes = conf.linePrefixes.map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
-      text = text
-        .split(/\r?\n/)
-        .filter(line => {
-          const t = String(line || '').trim().toLowerCase();
-          if (!t) return true;
-          const hit = prefixes.find(p => t.startsWith(p));
-          if (hit != null) bump(stats?.prefixes, hit, 1);
-          return hit == null;
-        })
-        .join('\n');
-    }
-    runRegexRules();
-    return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
-  };
-  const newCleanerStats = () => ({ rules: {}, tags: {}, prefixes: {} });
-  // 列出无法编译的正则规则，供监控页提示
-  const invalidRegexRules = (cfg) => normalizeCleaner(cfg).regexRules.filter(rule => { try { new RegExp(rule, 'gim'); return false; } catch { return true; } });
+  // 文本过滤（统一规则：纯英文 = 标签，其它 = 正则）见 cleaner.js，面板 / 自动总结 / 两个引擎共用一份。
 
   const DEF_RECALL_SETTINGS = { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, recentFloors: 0, animaDedupe: true, xiaobaixDedupe: true };
   const normalizeRecallSettings = (cfg) => {
@@ -479,7 +415,7 @@ export async function runRecall() {
       version: 'v34', evaluated: !!evaluated, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
       maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5, recentFloors: RECENT_FLOORS,
       embedding: embeddingInfo,
-      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, blockTags: cleanerCfg.blockTags, linePrefixes: cleanerCfg.linePrefixes, regexRules: cleanerCfg.regexRules, invalidRules: invalidRegexRules(cleanerCfg), stats: cleanerStats },
+      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, rules: cleanerCfg.rules, invalidRules: invalidCleanerRules(cleanerCfg), stats: cleanerStats },
       animaDedupeEnabled: recallCfg.animaDedupe !== false, animaDedupeActive: !!animaDedupe.active,
       animaDedupeRemoved: animaDedupe.removedIds?.size || 0,
       xiaobaixDedupeEnabled: recallCfg.xiaobaixDedupe !== false, xiaobaixDedupeActive: !!xiaobaixDedupe.active,

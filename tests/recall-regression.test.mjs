@@ -426,17 +426,22 @@ const cleanerRules = [
   String.raw`<gossip>[\s\S]*?<\/gossip>`,
   String.raw`<letter>[\s\S]*?<\/letter>`,
 ];
+// 统一规则列表：纯英文 = 标签（think / details），其它 = 正则。think 放最前、details 放最后，
+// 验证顺序可控：Episode 规则在 details 之前执行，所以 details 已无可删内容（命中 0）。
+const unifiedRules = ['think', ...cleanerRules, 'details'];
 const noisyMessage = [
   '正文开头，提到旧车站。',
+  '<think class="hidden">THINK_BODY</think>',
   '<Episode>', '<details>', '<summary>第三章</summary>', '章节 EPISODE_BODY', '</details>', '</Episode>',
   '<echo>ECHO_BODY</echo>',
   '<danmu>DANMU_A', 'DANMU_B</danmu>',
   '<gossip>GOSSIP_BODY</gossip>',
   '<letter>LETTER_BODY</letter>',
+  'affinity_change: +5 PREFIX_LINE',
   '正文结尾。',
 ].join('\n');
 
-async function executeCleaner(runRecall) {
+async function executeCleaner(runRecall, cleanerCfg) {
   const chatMetadata = { extensions: { MemoryPilot: { turnCounter: 0, stickyState: {} } }, variables: {} };
   const context = {
     chatId: 'cleaner-order',
@@ -450,7 +455,7 @@ async function executeCleaner(runRecall) {
     mp_active_chat: 'cleaner-order::character',
     mp_memories: JSON.stringify(recentFloorMemories),
     mp_recall_settings: JSON.stringify({ every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, recentFloors: 0, animaDedupe: false, xiaobaixDedupe: false }),
-    mp_text_clean_cfg: JSON.stringify({ blockTags: ['think', 'details'], linePrefixes: [], regexRules: cleanerRules, cleanForRecall: true, cleanForBatch: true }),
+    mp_text_clean_cfg: JSON.stringify(cleanerCfg),
   });
   globalThis.window = globalThis;
   globalThis.localStorage = storage;
@@ -468,26 +473,51 @@ async function executeCleaner(runRecall) {
 }
 
 for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]]) {
-  const snap = await executeCleaner(runRecall);
+  // 新版统一规则
+  const snap = await executeCleaner(runRecall, { rules: unifiedRules, cleanForRecall: true, cleanForBatch: true });
   assert.ok(snap, `${version}: 应保存召回监控快照`);
   const src = snap.sources?.[0];
   assert.equal(typeof src?.cleaned, 'string', `${version}: 快照中的聊天应带有过滤后文本 cleaned`);
   assert.equal(src.raw, noisyMessage, `${version}: 快照应保留聊天原文`);
-  for (const marker of ['EPISODE_BODY', '第三章', 'ECHO_BODY', 'DANMU_A', 'DANMU_B', 'GOSSIP_BODY', 'LETTER_BODY', '<Episode>', '</Episode>']) {
+  for (const marker of ['THINK_BODY', 'EPISODE_BODY', '第三章', 'ECHO_BODY', 'DANMU_A', 'DANMU_B', 'GOSSIP_BODY', 'LETTER_BODY', '<Episode>', '</Episode>']) {
     assert.ok(!src.cleaned.includes(marker), `${version}: 过滤后文本不应再包含 ${marker}`);
   }
+  assert.ok(src.cleaned.includes('PREFIX_LINE'), `${version}: 没有填整行规则时不应删除 affinity_change 行`);
   assert.ok(src.cleaned.includes('正文开头，提到旧车站。') && src.cleaned.includes('正文结尾。'), `${version}: 过滤不应误删正文`);
   assert.equal(snap.cleaner?.cleanForRecall, true, `${version}: 快照应记录召回前清洗开关`);
-  assert.deepEqual(snap.cleaner?.regexRules, cleanerRules, `${version}: 快照应记录本轮生效的正则规则`);
+  assert.deepEqual(snap.cleaner?.rules, unifiedRules, `${version}: 快照应记录本轮生效的统一规则列表`);
   assert.deepEqual(snap.cleaner?.invalidRules, ['[unclosed'], `${version}: 快照应标出无法编译的正则规则`);
   const stats = snap.cleaner?.stats;
   assert.ok(stats && typeof stats.rules === 'object', `${version}: 快照应记录每条规则的命中次数`);
   assert.equal(stats.rules['[unclosed'], undefined, `${version}: 无效正则不应有命中记录`);
   assert.equal(stats.rules[String.raw`<nothing>[\s\S]*?<\/nothing>`], 0, `${version}: 正文里没有的规则命中 0 次`);
+  assert.equal(stats.rules.think, 1, `${version}: 纯英文规则 think 应按标签删除（允许带属性），命中 1 次`);
   for (const rule of cleanerRules.slice(2)) {
     assert.equal(stats.rules[rule], 1, `${version}: 前面的无效/未命中规则不应影响后续规则，${rule} 应命中 1 次`);
   }
-  assert.equal(stats.tags.details, 0, `${version}: details 已被前面的正则连同 Episode 一起删掉，标签规则命中 0 次`);
+  assert.equal(stats.rules.details, 0, `${version}: details 已被前面的 Episode 正则一起删掉，标签规则命中 0 次`);
+
+  // 旧版三栏配置应自动迁移：regexRules → 标签 → 整行前缀（转成 ^\s*前缀.*$）
+  const legacySnap = await executeCleaner(runRecall, { blockTags: ['think', 'details'], linePrefixes: ['affinity_change:'], regexRules: cleanerRules, cleanForRecall: true, cleanForBatch: true });
+  const legacySrc = legacySnap.sources?.[0];
+  assert.deepEqual(legacySnap.cleaner?.rules, [...cleanerRules, 'think', 'details', String.raw`^\s*affinity_change:.*$`], `${version}: 旧版三栏配置应合并为统一规则列表`);
+  for (const marker of ['THINK_BODY', 'EPISODE_BODY', 'ECHO_BODY', 'LETTER_BODY', 'PREFIX_LINE']) {
+    assert.ok(!legacySrc.cleaned.includes(marker), `${version}: 迁移后的旧配置仍应删除 ${marker}`);
+  }
+  assert.ok(legacySrc.cleaned.includes('正文结尾。'), `${version}: 迁移后的旧配置不应误删正文`);
+  assert.equal(legacySnap.cleaner?.stats?.rules[String.raw`^\s*affinity_change:.*$`], 1, `${version}: 整行前缀迁移成的正则应命中 1 次`);
+}
+
+// cleaner.js 默认规则：旧版默认的标签 / 整行前缀 / 正则都还在
+{
+  const { DEF_CLEANER, normalizeCleaner, applyCleaner, ruleKind } = await import('../src/cleaner.js');
+  assert.deepEqual(normalizeCleaner(undefined).rules, [...DEF_CLEANER.rules], '空配置应得到默认规则');
+  assert.deepEqual(DEF_CLEANER.rules.map(ruleKind), ['tag', 'tag', 'regex', 'regex', 'regex', 'regex'], '默认规则类型：think / details 为标签，其余为正则');
+  const out = applyCleaner('开头\n<think>T</think>\n<details><summary>s</summary>D</details>\nmood_change: happy\n______\n结尾', undefined);
+  for (const marker of ['<think>', 'T</think>', '<details>', 'D</details>', 'mood_change', 'happy', '______']) {
+    assert.ok(!out.includes(marker), `默认规则应删除 think / details 整块、mood_change 整行和下划线行，不应残留 ${marker}`);
+  }
+  assert.ok(out.startsWith('开头') && out.endsWith('结尾'), '默认规则不应误删正文');
 }
 
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');

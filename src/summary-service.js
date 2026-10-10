@@ -1,6 +1,7 @@
 // Shared floor-summary helpers used by the manual panel and automatic summarizer.
 
 import { getChatScopeKey } from './chat-scope.js';
+import { normalizeCleaner, applyCleaner } from './cleaner.js';
 
 export const DEFAULT_SUMMARY_PROMPT = `分析以下对话，提取值得长期记忆的重要事件。
 
@@ -80,53 +81,8 @@ export function normalizePriority(value) {
   return 'medium';
 }
 
-export function normalizeCleaner(cfg) {
-  const defaults = {
-    blockTags: ['think', 'details'],
-    linePrefixes: ['affinity_change:', 'mood_change:', 'state_update:'],
-    regexRules: ['^____+$'],
-    cleanForRecall: true,
-    cleanForBatch: true,
-  };
-  const src = cfg && typeof cfg === 'object' ? cfg : {};
-  const list = (value, fallback) => Array.from(new Set(
-    (Array.isArray(value) ? value : fallback).map(x => String(x ?? '').trim()).filter(Boolean),
-  ));
-  return {
-    blockTags: list(src.blockTags, defaults.blockTags),
-    linePrefixes: list(src.linePrefixes, defaults.linePrefixes),
-    regexRules: list(src.regexRules, defaults.regexRules),
-    cleanForRecall: src.cleanForRecall !== false,
-    cleanForBatch: src.cleanForBatch !== false,
-  };
-}
-
-export function applyCleaner(input, cfg) {
-  let text = String(input ?? '');
-  const conf = normalizeCleaner(cfg);
-  // 用户正则先于内置标签删除执行（否则依赖内部 <details> 的规则会匹配不上），删完标签/整行后再跑一遍
-  const runRegexRules = () => {
-    for (const rawRule of conf.regexRules) {
-      try { text = text.replace(new RegExp(rawRule, 'gim'), ' '); } catch {}
-    }
-  };
-  runRegexRules();
-  for (const rawTag of conf.blockTags) {
-    try {
-      const re = new RegExp('<\\s*' + rawTag + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + rawTag + '\\s*>', 'gi');
-      text = text.replace(re, ' ');
-    } catch {}
-  }
-  if (conf.linePrefixes.length) {
-    const prefixes = conf.linePrefixes.map(x => x.toLowerCase());
-    text = text.split(/\r?\n/).filter(line => {
-      const trimmed = String(line || '').trim().toLowerCase();
-      return !trimmed || !prefixes.some(prefix => trimmed.startsWith(prefix));
-    }).join('\n');
-  }
-  runRegexRules();
-  return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
-}
+// 文本过滤统一在 cleaner.js 实现（纯英文 = 标签，其它 = 正则），这里转发以兼容 auto-summary 等旧引用
+export { normalizeCleaner, applyCleaner };
 
 export function extractAllJsonObjects(text) {
   const source = String(text ?? '').replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();

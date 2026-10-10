@@ -6,6 +6,7 @@ import { loadCurrentAnimaSummaries } from './anima-adapter.js';
 import { findLegacyHoraeCoverage, isLegacyHoraeSummaryMemory, loadCurrentHoraeMemories } from './horae-adapter.js';
 import { getChatScopeKey } from './chat-scope.js';
 import { loadEmbeddingCfg, saveEmbeddingCfg } from './embedding.js';
+import { DEF_CLEANER, normalizeCleaner, applyCleaner as applyCleanerRules, ruleKind, compileRule } from './cleaner.js';
 
 export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
 (async () => {
@@ -246,24 +247,7 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
   const loadBlacklist = ()=>{try{const r=localStorage.getItem(BK);const a=r?JSON.parse(r):[];return Array.isArray(a)?a:[];}catch{}return[];};
   const saveBlacklist = async arr => { await pushJson(BK, Array.isArray(arr)?arr:[]); };
 
-  const DEF_CLEANER = {
-    blockTags: ['think','details'],
-    linePrefixes: ['affinity_change:','mood_change:','state_update:'],
-    regexRules: ['^____+$'],
-    cleanForRecall: true,
-    cleanForBatch: true
-  };
-  const normalizeCleaner = (cfg) => {
-    const src = cfg && typeof cfg === 'object' ? cfg : {};
-    const normList = (arr) => Array.from(new Set((Array.isArray(arr) ? arr : []).map(x => String(x ?? '').trim()).filter(Boolean)));
-    return {
-      blockTags: normList(src.blockTags || DEF_CLEANER.blockTags),
-      linePrefixes: normList(src.linePrefixes || DEF_CLEANER.linePrefixes),
-      regexRules: normList(src.regexRules || DEF_CLEANER.regexRules),
-      cleanForRecall: src.cleanForRecall !== false,
-      cleanForBatch: src.cleanForBatch !== false
-    };
-  };
+  // 文本过滤（统一规则：纯英文 = 标签，其它 = 正则）的实现见 cleaner.js，与召回引擎 / 自动总结共用。
   let cleanerCfg = normalizeCleaner(await pullJson(CK, DEF_CLEANER));
   const loadCleaner = () => normalizeCleaner(cleanerCfg);
   const saveCleaner = async (cfg) => {
@@ -294,63 +278,7 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
     await pushJson(RK, recallCfg);
     await syncMeta({ recallEvery: recallCfg.every });
   };
-  // 每条规则（正则 / 标签 / 整行前缀）彼此独立：某一条编译失败或正文里没有可匹配内容，
-  // 只影响它自己，其余规则照常执行。stats 可选，用于统计每条规则的命中次数（测试按钮）。
-  const bumpStat = (bucket, key, n) => { if (bucket) bucket[key] = (bucket[key] || 0) + n; };
-  const applyCleaner = (input, cfg = cleanerCfg, stats = null) => {
-    let text = String(input ?? '');
-    const conf = normalizeCleaner(cfg);
-
-    // 用户正则先于内置标签删除执行：否则像 <Episode>…<details>…</details>…</Episode>
-    // 这种依赖内部标签的规则会因为 details 已被先删掉而永远匹配不上。
-    const runRegexRules = () => {
-      for (const rawRule of conf.regexRules) {
-        const rule = String(rawRule || '').trim();
-        if (!rule) continue;
-        let re;
-        try { re = new RegExp(rule, 'gim'); } catch { continue; }
-        let hits = 0;
-        try {
-          text = text.replace(re, () => { hits++; return ' '; });
-        } catch {}
-        bumpStat(stats?.rules, rule, hits);
-      }
-    };
-    runRegexRules();
-
-    for (const rawTag of conf.blockTags) {
-      const tag = String(rawTag || '').trim();
-      if (!tag) continue;
-      try {
-        const re = new RegExp('<\\s*' + tag + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + tag + '\\s*>', 'gi');
-        let hits = 0;
-        text = text.replace(re, () => { hits++; return ' '; });
-        bumpStat(stats?.tags, tag, hits);
-      } catch {}
-    }
-
-    if (conf.linePrefixes.length) {
-      const prefixes = conf.linePrefixes.map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
-      text = text
-        .split(/\r?\n/)
-        .filter(line => {
-          const t = String(line || '').trim().toLowerCase();
-          if (!t) return true;
-          const hit = prefixes.find(p => t.startsWith(p));
-          if (hit != null) bumpStat(stats?.prefixes, hit, 1);
-          return hit == null;
-        })
-        .join('\n');
-    }
-
-    // 再跑一遍：处理只有在标签/整行删除之后才会暴露出来的内容（如 ^____+$）
-    runRegexRules();
-
-    return text
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/[ \t]{2,}/g, ' ')
-      .trim();
-  };
+  const applyCleaner = (input, cfg = cleanerCfg, stats = null) => applyCleanerRules(input, cfg, stats);
   const STOP_WORDS = new Set(['的','了','在','是','和','与','并','后','前','中','内','外','对','把','被','让','将','及','后续','当前','相关','进行','继续','已经','开始','结束','然后','因为','所以','这个','那个','一次','一个','一种','没有','不是','自己','我们','你们','他们','她们']);
   const uniq = arr => Array.from(new Set((arr || []).filter(Boolean)));
 
@@ -1967,9 +1895,8 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
           <button class="btn bp1" id="mp_blsv" style="width:100%;padding:9px;font-size:13px">保存关键词黑名单</button>
           <div class="cfgtitle" style="margin-top:18px">文本清洗</div>
           <div class="ht" style="margin-bottom:12px">插件在匹配记忆关键词或总结楼层前，会按照下方规则删除不需要参与处理的内容。文本清洗只影响插件读取到的文本，不会修改聊天原文。</div>
-          <div class="fg"><label>删除指定标签及其内容</label><div class="ht" style="margin:4px 0 7px">删除指定标签及标签内部的全部内容。每行填写一个标签名称，例如 think、details、meta。</div><textarea class="cleaneditor" id="mp_ctags" style="min-height:90px">${h(loadCleaner().blockTags.join('\n'))}</textarea></div>
-          <div class="fg"><label>删除指定开头的整行</label><div class="ht" style="margin:4px 0 7px">如果一行文字以这里填写的内容开头，就删除整行。每行填写一种开头，例如 affinity_change:。</div><textarea class="cleaneditor" id="mp_cprefix" style="min-height:80px">${h(loadCleaner().linePrefixes.join('\n'))}</textarea></div>
-          <div class="fg"><label>用正则删除内容（高级）</label><div class="ht" style="margin:4px 0 7px">每行填写一条正则表达式，不需要添加两侧的 /，也不需要填写 g（实际按 gim 执行）。例如删除 HTML 注释可填写 &lt;!--[\s\S]*?--&gt;。正则会先于上面的「删除指定标签」执行，因此可以放心写 &lt;Episode&gt;\s*&lt;details&gt;…&lt;/details&gt;\s*&lt;/Episode&gt; 这类包含 details 的规则。</div><textarea class="cleaneditor" id="mp_cregex" style="min-height:80px">${h(loadCleaner().regexRules.join('\n'))}</textarea></div>
+          <div class="fg"><label>过滤规则（标签 / 正则，每行一条）</label><div class="ht" style="margin:4px 0 7px;line-height:1.65">每行一条规则，插件自动识别类型：<br>· <b>纯英文</b>（字母开头，只含字母 / 数字 / _ / -，例如 think、details、meta）→ 当作标签名，删除 &lt;think&gt;…&lt;/think&gt; 整块（允许标签带属性，大小写不敏感）；<br>· <b>其它任何内容</b> → 直接当作正则表达式使用，不需要两侧的 /，按 gim 执行，例如 &lt;!--[\s\S]*?--&gt;、&lt;echo&gt;[\s\S]*?&lt;\/echo&gt;；要删除以某个词开头的整行，写 ^\s*affinity_change:.*$。<br>规则按填写顺序执行，所有规则跑完后会再整体跑一遍（处理删掉标签后才露出来的内容）。每条规则彼此独立：某一条无效或没匹配到，不影响其它规则。</div><textarea class="cleaneditor" id="mp_crules" style="min-height:150px">${h(loadCleaner().rules.join('\n'))}</textarea><div class="ht" id="mp_crules_hint" style="margin-top:4px"></div></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px"><button class="btn" id="mp_clreset" style="flex:1;padding:7px;font-size:12px" title="把规则框恢复为内置默认规则（不会自动保存）">恢复默认规则</button></div>
           <div class="fg">
             <label>作用范围</label>
             <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
@@ -3527,37 +3454,49 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     toastr?.success?.('黑名单已保存');
   };
 
+  // 读取规则框：每行一条，纯英文 = 标签，其它 = 正则（类型由 cleaner.js 的 ruleKind 判定）
+  const readCleanerRules = () => Array.from(new Set($('mp_crules').value.split(/\n/).map(s=>s.trim()).filter(Boolean)));
+  // 规则框下方实时提示：识别出几条标签 / 几条正则、哪些正则无法编译
+  const refreshCleanerHint = () => {
+    const hint=$('mp_crules_hint'); if(!hint) return;
+    const rules=readCleanerRules();
+    const tags=rules.filter(r=>ruleKind(r)==='tag');
+    const regs=rules.filter(r=>ruleKind(r)==='regex');
+    const invalid=regs.filter(r=>compileRule(r)==null);
+    hint.innerHTML = `已识别：标签 ${tags.length} 条${tags.length?`（${h(tags.join('、'))}）`:''} · 正则 ${regs.length} 条${invalid.length?`<span style="color:#f87171"> · ${invalid.length} 条正则无法编译，将被跳过：${h(invalid.join(' ｜ '))}</span>`:''}`;
+  };
+  $('mp_crules').oninput = refreshCleanerHint;
+  refreshCleanerHint();
+  $('mp_clreset').onclick=()=>{
+    $('mp_crules').value = DEF_CLEANER.rules.join('\n');
+    refreshCleanerHint();
+    toastr?.info?.('已恢复默认过滤规则（未保存，请点「保存文本清洗规则」生效）');
+  };
   $('mp_clsv').onclick=async()=>{
     const cfg = {
-      blockTags: $('mp_ctags').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
-      linePrefixes: $('mp_cprefix').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
-      regexRules: $('mp_cregex').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
+      rules: readCleanerRules(),
       cleanForRecall: !!$('mp_c_recall').checked,
       cleanForBatch: !!$('mp_c_batch').checked
     };
     await saveCleaner(cfg);
+    refreshCleanerHint();
     toastr?.success?.('文本清洗规则已保存');
   };
   $('mp_cltest').onclick=()=>{
     const out=$('mp_cltest_out'); if(!out) return;
-    const cfg = {
-      blockTags: $('mp_ctags').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
-      linePrefixes: $('mp_cprefix').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
-      regexRules: $('mp_cregex').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
-      cleanForRecall: true, cleanForBatch: true
-    };
-    const invalid = cfg.regexRules.filter(r=>{ try{ new RegExp(r,'gim'); return false; }catch{ return true; } });
+    const cfg = { rules: readCleanerRules(), cleanForRecall: true, cleanForBatch: true };
     const last = [...(ctx?.chat||[])].reverse().find(m=>m && String(m.mes||'').trim());
     out.style.display='block';
     if(!last){ out.textContent='当前聊天没有可测试的消息。'; return; }
     const raw=String(last.mes||'');
-    const stats={ rules:{}, tags:{}, prefixes:{} };
+    const stats={ rules:{} };
     const cleaned=applyCleaner(raw,cfg,stats);
     // 逐条列出每个规则的命中情况，方便定位到底是哪一条没有匹配上
-    const lines=[];
-    for(const r of cfg.regexRules) lines.push(`${invalid.includes(r)?'✖ 无效正则（已跳过）':(stats.rules[r]?`✔ 命中 ${stats.rules[r]} 处`:'─ 未命中（这条消息里没有可匹配内容）')}  正则: ${r}`);
-    for(const t of cfg.blockTags) lines.push(`${stats.tags[t]?`✔ 命中 ${stats.tags[t]} 处`:'─ 未命中'}  标签: <${t}>`);
-    for(const p of cfg.linePrefixes) lines.push(`${stats.prefixes[p.toLowerCase()]?`✔ 删除 ${stats.prefixes[p.toLowerCase()]} 行`:'─ 未命中'}  整行前缀: ${p}`);
+    const lines=cfg.rules.map(r=>{
+      const kind = ruleKind(r)==='tag' ? `标签 <${r}>` : `正则 ${r}`;
+      if(compileRule(r)==null) return `✖ 无效正则（已跳过）  ${kind}`;
+      return `${stats.rules[r]?`✔ 命中 ${stats.rules[r]} 处`:'─ 未命中（这条消息里没有可匹配内容）'}  ${kind}`;
+    });
     const head = `最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${raw.trim()===cleaned.trim()?'（规则没有改动此条）':`（已过滤 ${raw.length-cleaned.length} 字）`}\n──── 逐条规则命中情况（每条独立执行，互不影响） ────\n${lines.join('\n')||'（没有规则）'}\n──── 过滤后文本 ────\n`;
     out.textContent = head + (cleaned || '（过滤后为空）');
   };
