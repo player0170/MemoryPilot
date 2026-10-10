@@ -62,7 +62,7 @@ export async function openMonitor() {
     const anyCleaned = sources.some(item => typeof item.cleaned === 'string');
     let cleanerHead = '';
     if (sources.length && !anyCleaned) {
-      cleanerHead = '<div class="setting" style="margin-bottom:8px;color:#fbbf24">⚠ 这份召回记录由旧版本插件生成，没有保存过滤后的文本，下面显示的是聊天原文。请确认酒馆里的 MemoryPilot 已更新到 4.2.4 及以上并刷新页面，然后再发送一条消息，这里才会显示过滤后的结果。</div>';
+      cleanerHead = '<div class="setting" style="margin-bottom:8px;color:#fbbf24">⚠ 这份召回记录里没有保存过滤后的文本，下面显示的是聊天原文。请刷新页面后再发送一条消息，这里会显示过滤后的结果和每条规则的命中次数。</div>';
     } else if (cleaner) {
       const rules = Array.isArray(cleaner.regexRules) ? cleaner.regexRules : [];
       const invalid = Array.isArray(cleaner.invalidRules) ? cleaner.invalidRules : [];
@@ -71,8 +71,14 @@ export async function openMonitor() {
       if (cleaner.cleanForRecall === false) {
         cleanerHead = '<div class="setting" style="margin-bottom:8px;color:#fbbf24">⚠ 「召回匹配前清洗」已关闭，本轮按聊天原文匹配，文本过滤规则没有生效。可在 设置 → 文本过滤 → 作用范围 中开启。</div>';
       } else {
-        const ruleList = rules.length ? rules.map(r => `<li><code>${esc(r)}</code>${invalid.includes(r) ? ' <span style="color:#f87171">（正则无效，已跳过）</span>' : ''}</li>`).join('') : '<li class="muted">（无）</li>';
-        cleanerHead = `<details style="margin-bottom:8px"><summary class="muted">本轮生效的文本过滤规则：删除标签 ${esc(tags.length)} 个 · 删除整行前缀 ${esc(prefixes.length)} 个 · 正则 ${esc(rules.length)} 条${invalid.length ? ` · <span style="color:#f87171">${esc(invalid.length)} 条正则无效</span>` : ''}</summary><div class="body"><div class="muted">删除标签：${tags.length ? esc(tags.join('、')) : '（无）'}</div><div class="muted">删除整行前缀：${prefixes.length ? esc(prefixes.join('、')) : '（无）'}</div><div class="muted">正则规则（先于标签删除执行）：</div><ul style="margin:4px 0 0 18px;padding:0;word-break:break-all">${ruleList}</ul></div></details>`;
+        // stats 由召回引擎在清洗时逐条统计：每条规则独立执行，这里直接显示它在本轮聊天里命中了几处
+        const stats = cleaner.stats && typeof cleaner.stats === 'object' ? cleaner.stats : null;
+        const hitTag = (n, unit = '处') => stats ? (n ? `<span style="color:#4ade80">✔ 命中 ${esc(n)} ${unit}</span>` : '<span class="muted">─ 未命中（本轮聊天里没有可匹配内容）</span>') : '';
+        const ruleList = rules.length ? rules.map(r => `<li>${invalid.includes(r) ? '<span style="color:#f87171">✖ 正则无效，已跳过</span>' : hitTag(stats?.rules?.[r] || 0)} <code>${esc(r)}</code></li>`).join('') : '<li class="muted">（无）</li>';
+        const tagList = tags.length ? tags.map(t => `<li>${hitTag(stats?.tags?.[t] || 0)} <code>&lt;${esc(t)}&gt;</code></li>`).join('') : '<li class="muted">（无）</li>';
+        const prefixList = prefixes.length ? prefixes.map(p => `<li>${hitTag(stats?.prefixes?.[String(p).toLowerCase()] || 0, '行')} <code>${esc(p)}</code></li>`).join('') : '<li class="muted">（无）</li>';
+        const hitRules = stats ? rules.filter(r => stats.rules?.[r]).length : null;
+        cleanerHead = `<details open style="margin-bottom:8px"><summary class="muted">本轮生效的文本过滤规则：正则 ${esc(rules.length)} 条${hitRules != null ? `（命中 ${esc(hitRules)} 条）` : ''} · 删除标签 ${esc(tags.length)} 个 · 删除整行前缀 ${esc(prefixes.length)} 个${invalid.length ? ` · <span style="color:#f87171">${esc(invalid.length)} 条正则无效</span>` : ''}</summary><div class="body"><div class="muted">每条规则独立执行：某一条无效或未命中，不影响其余规则。执行顺序：正则 → 删除标签 → 删除整行 → 正则再跑一遍。</div><div class="muted" style="margin-top:4px">用正则删除内容：</div><ul style="margin:4px 0 0 18px;padding:0;word-break:break-all">${ruleList}</ul><div class="muted" style="margin-top:4px">删除指定标签及其内容：</div><ul style="margin:4px 0 0 18px;padding:0">${tagList}</ul><div class="muted" style="margin-top:4px">删除指定开头的整行：</div><ul style="margin:4px 0 0 18px;padding:0">${prefixList}</ul></div></details>`;
       }
     }
     byId('mpr_sources').innerHTML = sources.length ? cleanerHead + sources.map(item => {

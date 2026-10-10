@@ -294,7 +294,10 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
     await pushJson(RK, recallCfg);
     await syncMeta({ recallEvery: recallCfg.every });
   };
-  const applyCleaner = (input, cfg = cleanerCfg) => {
+  // 每条规则（正则 / 标签 / 整行前缀）彼此独立：某一条编译失败或正文里没有可匹配内容，
+  // 只影响它自己，其余规则照常执行。stats 可选，用于统计每条规则的命中次数（测试按钮）。
+  const bumpStat = (bucket, key, n) => { if (bucket) bucket[key] = (bucket[key] || 0) + n; };
+  const applyCleaner = (input, cfg = cleanerCfg, stats = null) => {
     let text = String(input ?? '');
     const conf = normalizeCleaner(cfg);
 
@@ -304,9 +307,13 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
       for (const rawRule of conf.regexRules) {
         const rule = String(rawRule || '').trim();
         if (!rule) continue;
+        let re;
+        try { re = new RegExp(rule, 'gim'); } catch { continue; }
+        let hits = 0;
         try {
-          text = text.replace(new RegExp(rule, 'gim'), ' ');
+          text = text.replace(re, () => { hits++; return ' '; });
         } catch {}
+        bumpStat(stats?.rules, rule, hits);
       }
     };
     runRegexRules();
@@ -316,7 +323,9 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
       if (!tag) continue;
       try {
         const re = new RegExp('<\\s*' + tag + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + tag + '\\s*>', 'gi');
-        text = text.replace(re, ' ');
+        let hits = 0;
+        text = text.replace(re, () => { hits++; return ' '; });
+        bumpStat(stats?.tags, tag, hits);
       } catch {}
     }
 
@@ -327,7 +336,9 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
         .filter(line => {
           const t = String(line || '').trim().toLowerCase();
           if (!t) return true;
-          return !prefixes.some(p => t.startsWith(p));
+          const hit = prefixes.find(p => t.startsWith(p));
+          if (hit != null) bumpStat(stats?.prefixes, hit, 1);
+          return hit == null;
         })
         .join('\n');
     }
@@ -3539,8 +3550,15 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     const last = [...(ctx?.chat||[])].reverse().find(m=>m && String(m.mes||'').trim());
     out.style.display='block';
     if(!last){ out.textContent='当前聊天没有可测试的消息。'; return; }
-    const raw=String(last.mes||''); const cleaned=applyCleaner(raw,cfg);
-    const head = `最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${raw.trim()===cleaned.trim()?'（规则没有改动此条）':`（已过滤 ${raw.length-cleaned.length} 字）`}${invalid.length?`\n⚠ 以下正则无法编译，已跳过：\n${invalid.join('\n')}`:''}\n──── 过滤后文本 ────\n`;
+    const raw=String(last.mes||'');
+    const stats={ rules:{}, tags:{}, prefixes:{} };
+    const cleaned=applyCleaner(raw,cfg,stats);
+    // 逐条列出每个规则的命中情况，方便定位到底是哪一条没有匹配上
+    const lines=[];
+    for(const r of cfg.regexRules) lines.push(`${invalid.includes(r)?'✖ 无效正则（已跳过）':(stats.rules[r]?`✔ 命中 ${stats.rules[r]} 处`:'─ 未命中（这条消息里没有可匹配内容）')}  正则: ${r}`);
+    for(const t of cfg.blockTags) lines.push(`${stats.tags[t]?`✔ 命中 ${stats.tags[t]} 处`:'─ 未命中'}  标签: <${t}>`);
+    for(const p of cfg.linePrefixes) lines.push(`${stats.prefixes[p.toLowerCase()]?`✔ 删除 ${stats.prefixes[p.toLowerCase()]} 行`:'─ 未命中'}  整行前缀: ${p}`);
+    const head = `最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${raw.trim()===cleaned.trim()?'（规则没有改动此条）':`（已过滤 ${raw.length-cleaned.length} 字）`}\n──── 逐条规则命中情况（每条独立执行，互不影响） ────\n${lines.join('\n')||'（没有规则）'}\n──── 过滤后文本 ────\n`;
     out.textContent = head + (cleaned || '（过滤后为空）');
   };
 

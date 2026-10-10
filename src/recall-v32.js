@@ -191,7 +191,10 @@ export async function runRecall() {
       cleanForBatch: src.cleanForBatch !== false
     };
   };
-  const applyCleaner = (input, cfg) => {
+  // 每条规则（正则 / 标签 / 整行前缀）彼此独立：某一条编译失败或正文里没有可匹配内容，
+  // 只影响它自己，其余规则照常执行。stats 可选，用于统计每条规则的命中次数（监控 / 测试按钮）。
+  const bump = (bucket, key, n) => { if (bucket) bucket[key] = (bucket[key] || 0) + n; };
+  const applyCleaner = (input, cfg, stats = null) => {
     let text = String(input ?? '');
     const conf = normalizeCleaner(cfg);
     // 用户正则先于内置标签删除执行（否则依赖内部 <details> 的规则会匹配不上），删完标签/整行后再跑一遍
@@ -199,7 +202,11 @@ export async function runRecall() {
       for (const rawRule of conf.regexRules) {
         const rule = String(rawRule || '').trim();
         if (!rule) continue;
-        try { text = text.replace(new RegExp(rule, 'gim'), ' '); } catch {}
+        let re;
+        try { re = new RegExp(rule, 'gim'); } catch { continue; }
+        let hits = 0;
+        try { text = text.replace(re, () => { hits++; return ' '; }); } catch {}
+        bump(stats?.rules, rule, hits);
       }
     };
     runRegexRules();
@@ -208,7 +215,9 @@ export async function runRecall() {
       if (!tag) continue;
       try {
         const re = new RegExp('<\\s*' + tag + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + tag + '\\s*>', 'gi');
-        text = text.replace(re, ' ');
+        let hits = 0;
+        text = text.replace(re, () => { hits++; return ' '; });
+        bump(stats?.tags, tag, hits);
       } catch {}
     }
     if (conf.linePrefixes.length) {
@@ -218,13 +227,16 @@ export async function runRecall() {
         .filter(line => {
           const t = String(line || '').trim().toLowerCase();
           if (!t) return true;
-          return !prefixes.some(p => t.startsWith(p));
+          const hit = prefixes.find(p => t.startsWith(p));
+          if (hit != null) bump(stats?.prefixes, hit, 1);
+          return hit == null;
         })
         .join('\n');
     }
     runRegexRules();
     return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
   };
+  const newCleanerStats = () => ({ rules: {}, tags: {}, prefixes: {} });
   // 列出无法编译的正则规则，供监控页提示
   const invalidRegexRules = (cfg) => normalizeCleaner(cfg).regexRules.filter(rule => { try { new RegExp(rule, 'gim'); return false; } catch { return true; } });
 
@@ -456,16 +468,17 @@ export async function runRecall() {
 
   const recent = chat.slice(-CTX_MSGS);
   const currentFloorRange = recent.length ? [chat.length - recent.length + 1, chat.length] : null;
+  const cleanerStats = newCleanerStats();
   const sourceMessages = recent.map((m, index) => {
     const raw = String(m?.mes || '');
-    return { floor: chat.length - recent.length + index + 1, speaker: m?.is_user ? '用户' : (m?.name || '角色'), raw, cleaned: cleanerCfg.cleanForRecall ? applyCleaner(raw, cleanerCfg) : raw };
+    return { floor: chat.length - recent.length + index + 1, speaker: m?.is_user ? '用户' : (m?.name || '角色'), raw, cleaned: cleanerCfg.cleanForRecall ? applyCleaner(raw, cleanerCfg, cleanerStats) : raw };
   });
   const recordSnapshot = ({ evaluated, pinned = [], recent = [], triggered = [], note = '' }) => {
     saveRecallSnapshot({
       version: 'v32', evaluated: !!evaluated, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
       maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5, recentFloors: RECENT_FLOORS,
       embedding: embeddingInfo,
-      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, blockTags: cleanerCfg.blockTags, linePrefixes: cleanerCfg.linePrefixes, regexRules: cleanerCfg.regexRules, invalidRules: invalidRegexRules(cleanerCfg) },
+      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, blockTags: cleanerCfg.blockTags, linePrefixes: cleanerCfg.linePrefixes, regexRules: cleanerCfg.regexRules, invalidRules: invalidRegexRules(cleanerCfg), stats: cleanerStats },
       animaDedupeEnabled: recallCfg.animaDedupe !== false, animaDedupeActive: !!animaDedupe.active,
       animaDedupeRemoved: animaDedupe.removedIds?.size || 0,
       xiaobaixDedupeEnabled: recallCfg.xiaobaixDedupe !== false, xiaobaixDedupeActive: !!xiaobaixDedupe.active,

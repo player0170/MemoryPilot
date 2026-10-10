@@ -416,13 +416,15 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
 // ===== 文本过滤：用户正则需先于内置标签删除执行，并在监控快照中记录过滤结果 =====
 // 用户规则 <Episode>\s*<details>…</details>\s*</Episode> 依赖内部 <details>，
 // 如果先删掉 details 再跑正则，就永远匹配不上，导致监控里看起来“过滤完全没生效”。
+// 故意把一条无效正则和一条正文里没有的规则放在最前面：它们不能影响后面规则的执行。
 const cleanerRules = [
+  '[unclosed',
+  String.raw`<nothing>[\s\S]*?<\/nothing>`,
   String.raw`<Episode>\s*<details>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>\s*<\/Episode>`,
   String.raw`<echo>[\s\S]*?<\/echo>`,
   String.raw`<danmu>[\s\S]*?<\/danmu>`,
   String.raw`<gossip>[\s\S]*?<\/gossip>`,
   String.raw`<letter>[\s\S]*?<\/letter>`,
-  '[unclosed',
 ];
 const noisyMessage = [
   '正文开头，提到旧车站。',
@@ -478,6 +480,14 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   assert.equal(snap.cleaner?.cleanForRecall, true, `${version}: 快照应记录召回前清洗开关`);
   assert.deepEqual(snap.cleaner?.regexRules, cleanerRules, `${version}: 快照应记录本轮生效的正则规则`);
   assert.deepEqual(snap.cleaner?.invalidRules, ['[unclosed'], `${version}: 快照应标出无法编译的正则规则`);
+  const stats = snap.cleaner?.stats;
+  assert.ok(stats && typeof stats.rules === 'object', `${version}: 快照应记录每条规则的命中次数`);
+  assert.equal(stats.rules['[unclosed'], undefined, `${version}: 无效正则不应有命中记录`);
+  assert.equal(stats.rules[String.raw`<nothing>[\s\S]*?<\/nothing>`], 0, `${version}: 正文里没有的规则命中 0 次`);
+  for (const rule of cleanerRules.slice(2)) {
+    assert.equal(stats.rules[rule], 1, `${version}: 前面的无效/未命中规则不应影响后续规则，${rule} 应命中 1 次`);
+  }
+  assert.equal(stats.tags.details, 0, `${version}: details 已被前面的正则连同 Episode 一起删掉，标签规则命中 0 次`);
 }
 
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
