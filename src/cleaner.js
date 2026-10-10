@@ -91,7 +91,7 @@ export const invalidCleanerRules = (cfg) => activeCleanerRules(cfg).filter(rule 
 const finish = (text) => String(text).replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
 
 // 「只保留」模式：把每条保留规则命中的片段按在原文中的出现顺序拼起来
-function applyKeepRules(text, keepTags, bucket) {
+function applyKeepRules(text, keepTags, bucket, samples) {
   const compiled = keepTags.map(rule => ({ rule, re: compileRule(rule) })).filter(x => x.re);
   const pieces = [];
   for (const { rule, re } of compiled) {
@@ -103,6 +103,7 @@ function applyKeepRules(text, keepTags, bucket) {
         if (m[0] === '') { re.lastIndex++; continue; }
         const piece = (m.length > 1 && m[1] != null) ? m[1] : m[0];
         if (String(piece).trim()) pieces.push({ at: m.index, piece: String(piece) });
+        if (samples) (samples[rule] = samples[rule] || []).push(String(piece));
         hits++;
         if (!re.global) break;
       }
@@ -117,14 +118,16 @@ export function applyCleaner(input, cfg, stats = null) {
   let text = String(input ?? '');
   const conf = normalizeCleaner(cfg);
   const bucket = stats && typeof stats === 'object' ? (stats.rules = stats.rules || {}) : null;
+  // 传入 stats.samples（对象）时，额外记录每条规则实际删掉 / 保留的原文片段，供「测试」预览展示
+  const samples = stats && stats.samples && typeof stats.samples === 'object' ? stats.samples : null;
   if (stats && typeof stats === 'object') stats.mode = conf.keepTags.length ? 'keep' : 'remove';
   // 白名单优先：填写了「只保留」规则时，删除规则整体不生效
-  if (conf.keepTags.length) return applyKeepRules(text, conf.keepTags, bucket);
+  if (conf.keepTags.length) return applyKeepRules(text, conf.keepTags, bucket, samples);
   const compiled = conf.rules.map(rule => ({ rule, re: compileRule(rule) })).filter(x => x.re);
   const runAll = () => {
     for (const { rule, re } of compiled) {
       let hits = 0;
-      try { text = text.replace(re, () => { hits++; return ' '; }); } catch {}
+      try { text = text.replace(re, (m) => { hits++; if (samples) (samples[rule] = samples[rule] || []).push(String(m)); return ' '; }); } catch {}
       if (bucket) bucket[rule] = (bucket[rule] || 0) + hits;
     }
   };

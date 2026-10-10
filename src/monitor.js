@@ -82,7 +82,7 @@ export async function openMonitor() {
         // stats 由召回引擎在清洗时逐条统计：每条规则独立执行，这里直接显示它在本轮聊天里命中了几处
         const stats = cleaner.stats && typeof cleaner.stats === 'object' ? cleaner.stats : null;
         const hitOf = (r) => stats ? Number(stats.rules?.[r] ?? stats.tags?.[r] ?? stats.prefixes?.[String(r).toLowerCase()] ?? 0) : null;
-        const hitTag = (n) => n == null ? '' : (n ? `<span style="color:#4ade80">✔ 命中 ${esc(n)} 处</span>` : '<span class="muted">─ 未命中（本轮聊天里没有可匹配内容）</span>');
+        const hitTag = (n) => n == null ? '' : (n ? `<span style="color:#4ade80">✔ 匹配上 → 已${keepOn ? '保留' : '删除'} ${esc(n)} 处</span>` : '<span class="muted">✘ 没匹配上（本轮聊天里没有，什么都没删）</span>');
         const kindOf = (r) => (legacy && !keepOn)
           ? ((cleaner.blockTags || []).includes(r) ? '标签' : (cleaner.linePrefixes || []).includes(r) ? '整行前缀' : '正则')
           : (ruleKind(r) === 'tag' ? '标签' : '正则');

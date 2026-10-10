@@ -3510,20 +3510,34 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     out.style.display='block';
     if(!last){ out.textContent='当前聊天没有可测试的消息。'; return; }
     const raw=String(last.mes||'');
-    const stats={ rules:{} };
+    // stats.samples 会记下每条规则实际删掉（或保留）的原文片段，用来证明「确实匹配上并删掉了」
+    const stats={ rules:{}, samples:{} };
     const cleaned=applyCleaner(raw,cfg,stats);
-    // 逐条列出每个规则的命中情况，方便定位到底是哪一条没有匹配上（只保留模式下列的是白名单规则）
     const activeRules = keepOn ? keepTags : cfg.rules;
+    // 单独对原文再数一遍：某条规则实际执行时没删到，但原文里能匹配上，说明内容已被前面的规则一并删掉
+    const countHits=(r)=>{ const re=compileRule(r); if(!re) return 0; try{ return (raw.match(re)||[]).filter(x=>x!=='').length; }catch{ return 0; } };
+    const snip=(s)=>{ const t=String(s||'').replace(/\s+/g,' ').trim(); return t.length>60 ? t.slice(0,60)+'…' : t; };
+    const showSamples=(arr)=>{ const list=(arr||[]).filter(x=>String(x).trim()); if(!list.length) return ''; return '\n      └ '+list.slice(0,2).map(x=>`「${snip(x)}」`).join('  ')+(list.length>2?`  …共 ${list.length} 处`:''); };
+    let doneCount=0, coveredCount=0, missCount=0, badCount=0;
     const lines=activeRules.map(r=>{
       const kind = ruleKind(r)==='tag' ? `标签 <${r}>` : `正则 ${r}`;
-      if(compileRule(r)==null) return `✖ 无效正则（已跳过）  ${kind}`;
-      return `${stats.rules[r]?`✔ 命中 ${stats.rules[r]} 处`:'─ 未命中（这条消息里没有可匹配内容）'}  ${kind}`;
+      if(compileRule(r)==null){ badCount++; return `✖ 无效正则（写法有误，已跳过）  ${kind}`; }
+      const done=Number(stats.rules[r]||0);
+      if(done){ doneCount++; return `✔ 匹配上 → ${keepOn?'已保留':'已删除'} ${done} 处  ${kind}${showSamples(stats.samples[r])}`; }
+      const indep=countHits(r);
+      if(!keepOn && indep){ coveredCount++; return `✔ 匹配上 ${indep} 处（内容已被上面的规则一并删掉）  ${kind}`; }
+      missCount++;
+      return `✘ 没匹配上（这条消息里没有，什么都没${keepOn?'保留':'删'}）  ${kind}`;
     });
     const modeLine = keepOn ? `模式：只保留（白名单 ${keepTags.length} 条，「过滤规则」不生效）` : `模式：删除（过滤规则 ${cfg.rules.length} 条）`;
+    const sumLine = keepOn
+      ? `结果：匹配上并已保留 ${doneCount} 条 · 没匹配上 ${missCount} 条${badCount?` · 无效 ${badCount} 条`:''}`
+      : `结果：匹配上并已删除 ${doneCount+coveredCount} 条${coveredCount?`（其中 ${coveredCount} 条的内容被前面的规则一并删掉）`:''} · 没匹配上 ${missCount} 条${badCount?` · 无效 ${badCount} 条`:''}`;
     const changeNote = raw.trim()===cleaned.trim()
       ? '（规则没有改动此条）'
-      : keepOn ? `（只保留了命中片段${cleaned?'':'；一条都没命中，此消息将被视为空'}）` : `（已过滤 ${raw.length-cleaned.length} 字）`;
-    const head = `${modeLine}\n最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${changeNote}\n──── 逐条规则命中情况（每条独立执行，互不影响） ────\n${lines.join('\n')||'（没有规则）'}\n──── 过滤后文本 ────\n`;
+      : keepOn ? `（只保留了命中片段${cleaned?'':'；一条都没命中，此消息将被视为空'}）`
+      : doneCount ? `（规则删除后减少 ${raw.length-cleaned.length} 字）` : `（没有规则匹配上，只整理了 ${raw.length-cleaned.length} 个多余空格 / 空行）`;
+    const head = `${modeLine}\n最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${changeNote}\n${sumLine}\n──── 逐条规则结果 ────\n${lines.join('\n')||'（没有规则）'}\n──── 过滤后文本 ────\n`;
     out.textContent = head + (cleaned || '（过滤后为空）');
   };
 
