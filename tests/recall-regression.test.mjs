@@ -413,6 +413,73 @@ for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]
   assert.equal(nonEval.storedSticky['mid-1']?.turnsLeft, 2, `${version}: 非评估轮 sticky 衰减逻辑应保持不变`);
 }
 
+// ===== 文本过滤：用户正则需先于内置标签删除执行，并在监控快照中记录过滤结果 =====
+// 用户规则 <Episode>\s*<details>…</details>\s*</Episode> 依赖内部 <details>，
+// 如果先删掉 details 再跑正则，就永远匹配不上，导致监控里看起来“过滤完全没生效”。
+const cleanerRules = [
+  String.raw`<Episode>\s*<details>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>\s*<\/Episode>`,
+  String.raw`<echo>[\s\S]*?<\/echo>`,
+  String.raw`<danmu>[\s\S]*?<\/danmu>`,
+  String.raw`<gossip>[\s\S]*?<\/gossip>`,
+  String.raw`<letter>[\s\S]*?<\/letter>`,
+  '[unclosed',
+];
+const noisyMessage = [
+  '正文开头，提到旧车站。',
+  '<Episode>', '<details>', '<summary>第三章</summary>', '章节 EPISODE_BODY', '</details>', '</Episode>',
+  '<echo>ECHO_BODY</echo>',
+  '<danmu>DANMU_A', 'DANMU_B</danmu>',
+  '<gossip>GOSSIP_BODY</gossip>',
+  '<letter>LETTER_BODY</letter>',
+  '正文结尾。',
+].join('\n');
+
+async function executeCleaner(runRecall) {
+  const chatMetadata = { extensions: { MemoryPilot: { turnCounter: 0, stickyState: {} } }, variables: {} };
+  const context = {
+    chatId: 'cleaner-order',
+    name2: 'character',
+    chat: [{ is_user: false, name: 'Char', mes: noisyMessage }],
+    chatMetadata,
+    extensionSettings: { MemoryPilot: {} },
+    saveSettingsDebounced() {},
+  };
+  const storage = new MemoryStorage({
+    mp_active_chat: 'cleaner-order::character',
+    mp_memories: JSON.stringify(recentFloorMemories),
+    mp_recall_settings: JSON.stringify({ every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, recentFloors: 0, animaDedupe: false, xiaobaixDedupe: false }),
+    mp_text_clean_cfg: JSON.stringify({ blockTags: ['think', 'details'], linePrefixes: [], regexRules: cleanerRules, cleanForRecall: true, cleanForBatch: true }),
+  });
+  globalThis.window = globalThis;
+  globalThis.localStorage = storage;
+  globalThis.SillyTavern = { getContext: () => context };
+  globalThis.TavernHelper = undefined;
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(callback, Math.min(Number(delay) || 0, 1), ...args);
+  try {
+    await settleRecall(runRecall);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  const snapRaw = [...storage.values.entries()].find(([k]) => k.startsWith('mp_recall_snapshot_'))?.[1];
+  return snapRaw ? JSON.parse(snapRaw) : null;
+}
+
+for (const [version, runRecall] of [['v32', runRecallV32], ['v34', runRecallV34]]) {
+  const snap = await executeCleaner(runRecall);
+  assert.ok(snap, `${version}: 应保存召回监控快照`);
+  const src = snap.sources?.[0];
+  assert.equal(typeof src?.cleaned, 'string', `${version}: 快照中的聊天应带有过滤后文本 cleaned`);
+  assert.equal(src.raw, noisyMessage, `${version}: 快照应保留聊天原文`);
+  for (const marker of ['EPISODE_BODY', '第三章', 'ECHO_BODY', 'DANMU_A', 'DANMU_B', 'GOSSIP_BODY', 'LETTER_BODY', '<Episode>', '</Episode>']) {
+    assert.ok(!src.cleaned.includes(marker), `${version}: 过滤后文本不应再包含 ${marker}`);
+  }
+  assert.ok(src.cleaned.includes('正文开头，提到旧车站。') && src.cleaned.includes('正文结尾。'), `${version}: 过滤不应误删正文`);
+  assert.equal(snap.cleaner?.cleanForRecall, true, `${version}: 快照应记录召回前清洗开关`);
+  assert.deepEqual(snap.cleaner?.regexRules, cleanerRules, `${version}: 快照应记录本轮生效的正则规则`);
+  assert.deepEqual(snap.cleaner?.invalidRules, ['[unclosed'], `${version}: 快照应标出无法编译的正则规则`);
+}
+
 const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 assert.doesNotMatch(indexSource, /MemoryPilotRecallInterceptor/, '不应保留生成前召回拦截器');
 assert.match(indexSource, /MESSAGE_RECEIVED[\s\S]*?await runRecall\(\)/, '召回应继续由 MESSAGE_RECEIVED 触发');

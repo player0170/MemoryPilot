@@ -58,11 +58,28 @@ export async function openMonitor() {
     byId('mpr_summary').textContent = `最近一次召回${snap.savedAt ? `（${new Date(snap.savedAt).toLocaleTimeString()}）` : ''}`;
     byId('mpr_rules').innerHTML = `<div>每 ${esc(snap.recallEvery || 1)} 轮重新匹配，读取最近 ${esc(snap.contextWindow || sources.length)} 条聊天。</div><div class="row"><div class="setting">最多召回 ${esc(snap.maxRecall || 6)} 条</div><div class="setting">命中后保留 ${esc(snap.stickyTurns ?? 5)} 轮</div><div class="setting">最近楼层记忆：${recentFloors > 0 ? `${esc(recentFloors)} 条` : '关闭'}</div><div class="setting">Anima 去重：${snap.animaDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">小白 X 去重：${snap.xiaobaixDedupeEnabled === false ? '关闭' : '开启'}</div><div class="setting">${embSetting}</div></div>${embNote}`;
     // 展示经「文本过滤」处理后的实际匹配文本；旧快照没有 cleaned 字段时回退原文
-    byId('mpr_sources').innerHTML = sources.length ? sources.map(item => {
+    const cleaner = snap.cleaner && typeof snap.cleaner === 'object' ? snap.cleaner : null;
+    const anyCleaned = sources.some(item => typeof item.cleaned === 'string');
+    let cleanerHead = '';
+    if (sources.length && !anyCleaned) {
+      cleanerHead = '<div class="setting" style="margin-bottom:8px;color:#fbbf24">⚠ 这份召回记录由旧版本插件生成，没有保存过滤后的文本，下面显示的是聊天原文。请确认酒馆里的 MemoryPilot 已更新到 4.2.4 及以上并刷新页面，然后再发送一条消息，这里才会显示过滤后的结果。</div>';
+    } else if (cleaner) {
+      const rules = Array.isArray(cleaner.regexRules) ? cleaner.regexRules : [];
+      const invalid = Array.isArray(cleaner.invalidRules) ? cleaner.invalidRules : [];
+      const tags = Array.isArray(cleaner.blockTags) ? cleaner.blockTags : [];
+      const prefixes = Array.isArray(cleaner.linePrefixes) ? cleaner.linePrefixes : [];
+      if (cleaner.cleanForRecall === false) {
+        cleanerHead = '<div class="setting" style="margin-bottom:8px;color:#fbbf24">⚠ 「召回匹配前清洗」已关闭，本轮按聊天原文匹配，文本过滤规则没有生效。可在 设置 → 文本过滤 → 作用范围 中开启。</div>';
+      } else {
+        const ruleList = rules.length ? rules.map(r => `<li><code>${esc(r)}</code>${invalid.includes(r) ? ' <span style="color:#f87171">（正则无效，已跳过）</span>' : ''}</li>`).join('') : '<li class="muted">（无）</li>';
+        cleanerHead = `<details style="margin-bottom:8px"><summary class="muted">本轮生效的文本过滤规则：删除标签 ${esc(tags.length)} 个 · 删除整行前缀 ${esc(prefixes.length)} 个 · 正则 ${esc(rules.length)} 条${invalid.length ? ` · <span style="color:#f87171">${esc(invalid.length)} 条正则无效</span>` : ''}</summary><div class="body"><div class="muted">删除标签：${tags.length ? esc(tags.join('、')) : '（无）'}</div><div class="muted">删除整行前缀：${prefixes.length ? esc(prefixes.join('、')) : '（无）'}</div><div class="muted">正则规则（先于标签删除执行）：</div><ul style="margin:4px 0 0 18px;padding:0;word-break:break-all">${ruleList}</ul></div></details>`;
+      }
+    }
+    byId('mpr_sources').innerHTML = sources.length ? cleanerHead + sources.map(item => {
       const hasCleaned = typeof item.cleaned === 'string';
       const shown = hasCleaned ? item.cleaned : item.raw;
       const changed = hasCleaned && String(item.cleaned).trim() !== String(item.raw || '').trim();
-      const tag = hasCleaned ? (changed ? ' <span class="muted">（已应用文本过滤，已过滤 ' + Math.max(0, String(item.raw || '').length - String(item.cleaned).length) + ' 字）</span>' : ' <span class="muted">（文本过滤未改动此条）</span>') : '';
+      const tag = hasCleaned ? (changed ? ' <span class="muted">（已应用文本过滤，已过滤 ' + Math.max(0, String(item.raw || '').length - String(item.cleaned).length) + ' 字）</span>' : ' <span class="muted">（文本过滤未改动此条）</span>') : ' <span style="color:#fbbf24">（原文，未经过滤）</span>';
       const orig = changed ? `<details><summary class="muted">查看原文</summary><div>${esc(item.raw || '（空）')}</div></details>` : '';
       return `<article class="item"><b>#${esc(item.floor)} ${esc(item.speaker)}</b>${tag}<div>${esc(shown || '（过滤后为空）')}</div>${orig}</article>`;
     }).join('') : '<div class="muted">本轮没有可用于匹配的聊天内容。</div>';

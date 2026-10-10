@@ -298,6 +298,19 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
     let text = String(input ?? '');
     const conf = normalizeCleaner(cfg);
 
+    // 用户正则先于内置标签删除执行：否则像 <Episode>…<details>…</details>…</Episode>
+    // 这种依赖内部标签的规则会因为 details 已被先删掉而永远匹配不上。
+    const runRegexRules = () => {
+      for (const rawRule of conf.regexRules) {
+        const rule = String(rawRule || '').trim();
+        if (!rule) continue;
+        try {
+          text = text.replace(new RegExp(rule, 'gim'), ' ');
+        } catch {}
+      }
+    };
+    runRegexRules();
+
     for (const rawTag of conf.blockTags) {
       const tag = String(rawTag || '').trim();
       if (!tag) continue;
@@ -319,13 +332,8 @@ export async function openPanel(initialTab = 'list', initialCfg = 'recall') {
         .join('\n');
     }
 
-    for (const rawRule of conf.regexRules) {
-      const rule = String(rawRule || '').trim();
-      if (!rule) continue;
-      try {
-        text = text.replace(new RegExp(rule, 'gim'), ' ');
-      } catch {}
-    }
+    // 再跑一遍：处理只有在标签/整行删除之后才会暴露出来的内容（如 ^____+$）
+    runRegexRules();
 
     return text
       .replace(/\n{3,}/g, '\n\n')
@@ -1950,7 +1958,7 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
           <div class="ht" style="margin-bottom:12px">插件在匹配记忆关键词或总结楼层前，会按照下方规则删除不需要参与处理的内容。文本清洗只影响插件读取到的文本，不会修改聊天原文。</div>
           <div class="fg"><label>删除指定标签及其内容</label><div class="ht" style="margin:4px 0 7px">删除指定标签及标签内部的全部内容。每行填写一个标签名称，例如 think、details、meta。</div><textarea class="cleaneditor" id="mp_ctags" style="min-height:90px">${h(loadCleaner().blockTags.join('\n'))}</textarea></div>
           <div class="fg"><label>删除指定开头的整行</label><div class="ht" style="margin:4px 0 7px">如果一行文字以这里填写的内容开头，就删除整行。每行填写一种开头，例如 affinity_change:。</div><textarea class="cleaneditor" id="mp_cprefix" style="min-height:80px">${h(loadCleaner().linePrefixes.join('\n'))}</textarea></div>
-          <div class="fg"><label>用正则删除内容（高级）</label><div class="ht" style="margin:4px 0 7px">每行填写一条正则表达式，不需要添加两侧的 /，也不需要填写 g。例如删除 HTML 注释可填写 &lt;!--[\s\S]*?--&gt;。</div><textarea class="cleaneditor" id="mp_cregex" style="min-height:80px">${h(loadCleaner().regexRules.join('\n'))}</textarea></div>
+          <div class="fg"><label>用正则删除内容（高级）</label><div class="ht" style="margin:4px 0 7px">每行填写一条正则表达式，不需要添加两侧的 /，也不需要填写 g（实际按 gim 执行）。例如删除 HTML 注释可填写 &lt;!--[\s\S]*?--&gt;。正则会先于上面的「删除指定标签」执行，因此可以放心写 &lt;Episode&gt;\s*&lt;details&gt;…&lt;/details&gt;\s*&lt;/Episode&gt; 这类包含 details 的规则。</div><textarea class="cleaneditor" id="mp_cregex" style="min-height:80px">${h(loadCleaner().regexRules.join('\n'))}</textarea></div>
           <div class="fg">
             <label>作用范围</label>
             <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
@@ -1958,7 +1966,11 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
               <label class="mp-check"><input type="checkbox" id="mp_c_batch" ${loadCleaner().cleanForBatch ? 'checked' : ''}>楼层总结前清洗</label>
             </div>
           </div>
-          <button class="btn bp1" id="mp_clsv" style="width:100%;padding:9px;font-size:13px">保存文本清洗规则</button>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn bp1" id="mp_clsv" style="flex:1;padding:9px;font-size:13px">保存文本清洗规则</button>
+            <button class="btn" id="mp_cltest" style="flex:1;padding:9px;font-size:13px" title="用上面填写的规则（可未保存）处理最近一条聊天，预览过滤效果">用最近一条消息测试</button>
+          </div>
+          <div class="ht" id="mp_cltest_out" style="margin-top:8px;white-space:pre-wrap;word-break:break-all;display:none"></div>
           </div>
           </section>
           <section class="cfgsection" data-cfg-section="data">
@@ -3514,6 +3526,22 @@ floorRange：该事件实际涵盖的起止楼层号 [start, end]，根据对话
     };
     await saveCleaner(cfg);
     toastr?.success?.('文本清洗规则已保存');
+  };
+  $('mp_cltest').onclick=()=>{
+    const out=$('mp_cltest_out'); if(!out) return;
+    const cfg = {
+      blockTags: $('mp_ctags').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
+      linePrefixes: $('mp_cprefix').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
+      regexRules: $('mp_cregex').value.split(/\n/).map(s=>s.trim()).filter(Boolean),
+      cleanForRecall: true, cleanForBatch: true
+    };
+    const invalid = cfg.regexRules.filter(r=>{ try{ new RegExp(r,'gim'); return false; }catch{ return true; } });
+    const last = [...(ctx?.chat||[])].reverse().find(m=>m && String(m.mes||'').trim());
+    out.style.display='block';
+    if(!last){ out.textContent='当前聊天没有可测试的消息。'; return; }
+    const raw=String(last.mes||''); const cleaned=applyCleaner(raw,cfg);
+    const head = `最近一条消息（#${(ctx.chat.indexOf(last))+1}，${last.is_user?'用户':(last.name||'角色')}）：原文 ${raw.length} 字 → 过滤后 ${cleaned.length} 字${raw.trim()===cleaned.trim()?'（规则没有改动此条）':`（已过滤 ${raw.length-cleaned.length} 字）`}${invalid.length?`\n⚠ 以下正则无法编译，已跳过：\n${invalid.join('\n')}`:''}\n──── 过滤后文本 ────\n`;
+    out.textContent = head + (cleaned || '（过滤后为空）');
   };
 
   // === 导出 / 导入 ===

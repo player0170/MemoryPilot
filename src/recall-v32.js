@@ -194,6 +194,15 @@ export async function runRecall() {
   const applyCleaner = (input, cfg) => {
     let text = String(input ?? '');
     const conf = normalizeCleaner(cfg);
+    // 用户正则先于内置标签删除执行（否则依赖内部 <details> 的规则会匹配不上），删完标签/整行后再跑一遍
+    const runRegexRules = () => {
+      for (const rawRule of conf.regexRules) {
+        const rule = String(rawRule || '').trim();
+        if (!rule) continue;
+        try { text = text.replace(new RegExp(rule, 'gim'), ' '); } catch {}
+      }
+    };
+    runRegexRules();
     for (const rawTag of conf.blockTags) {
       const tag = String(rawTag || '').trim();
       if (!tag) continue;
@@ -213,13 +222,11 @@ export async function runRecall() {
         })
         .join('\n');
     }
-    for (const rawRule of conf.regexRules) {
-      const rule = String(rawRule || '').trim();
-      if (!rule) continue;
-      try { text = text.replace(new RegExp(rule, 'gim'), ' '); } catch {}
-    }
+    runRegexRules();
     return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
   };
+  // 列出无法编译的正则规则，供监控页提示
+  const invalidRegexRules = (cfg) => normalizeCleaner(cfg).regexRules.filter(rule => { try { new RegExp(rule, 'gim'); return false; } catch { return true; } });
 
   const DEF_RECALL_SETTINGS = { every: 1, alpha: 0.72, stickyTurns: 5, contextWindow: 8, maxRecall: 6, recentFloors: 0, animaDedupe: true, xiaobaixDedupe: true };
   const normalizeRecallSettings = (cfg) => {
@@ -458,6 +465,7 @@ export async function runRecall() {
       version: 'v32', evaluated: !!evaluated, contextWindow: CTX_MSGS, recallEvery: RECALL_EVERY,
       maxRecall: MAX_RECALL, stickyTurns: recallCfg.stickyTurns ?? 5, recentFloors: RECENT_FLOORS,
       embedding: embeddingInfo,
+      cleaner: { cleanForRecall: !!cleanerCfg.cleanForRecall, blockTags: cleanerCfg.blockTags, linePrefixes: cleanerCfg.linePrefixes, regexRules: cleanerCfg.regexRules, invalidRules: invalidRegexRules(cleanerCfg) },
       animaDedupeEnabled: recallCfg.animaDedupe !== false, animaDedupeActive: !!animaDedupe.active,
       animaDedupeRemoved: animaDedupe.removedIds?.size || 0,
       xiaobaixDedupeEnabled: recallCfg.xiaobaixDedupe !== false, xiaobaixDedupeActive: !!xiaobaixDedupe.active,

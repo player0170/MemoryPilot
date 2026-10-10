@@ -104,6 +104,13 @@ export function normalizeCleaner(cfg) {
 export function applyCleaner(input, cfg) {
   let text = String(input ?? '');
   const conf = normalizeCleaner(cfg);
+  // 用户正则先于内置标签删除执行（否则依赖内部 <details> 的规则会匹配不上），删完标签/整行后再跑一遍
+  const runRegexRules = () => {
+    for (const rawRule of conf.regexRules) {
+      try { text = text.replace(new RegExp(rawRule, 'gim'), ' '); } catch {}
+    }
+  };
+  runRegexRules();
   for (const rawTag of conf.blockTags) {
     try {
       const re = new RegExp('<\\s*' + rawTag + '\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*' + rawTag + '\\s*>', 'gi');
@@ -117,9 +124,7 @@ export function applyCleaner(input, cfg) {
       return !trimmed || !prefixes.some(prefix => trimmed.startsWith(prefix));
     }).join('\n');
   }
-  for (const rawRule of conf.regexRules) {
-    try { text = text.replace(new RegExp(rawRule, 'gim'), ' '); } catch {}
-  }
+  runRegexRules();
   return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
